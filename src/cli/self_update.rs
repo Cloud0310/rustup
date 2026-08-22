@@ -687,7 +687,7 @@ fn check_existence_of_settings_file(process: &Process) -> Result<()> {
 fn pre_install_msg(no_modify_path: bool, process: &Process) -> Result<String> {
     let cargo_home = process.cargo_home()?;
     let cargo_home_bin = cargo_home.join("bin");
-    let rustup_home = home::rustup_home()?;
+    let rustup_home = process.rustup_home()?;
 
     if !no_modify_path {
         // Brittle code warning: some duplication in unix::do_add_to_path
@@ -962,7 +962,7 @@ pub(crate) fn uninstall(no_prompt: bool, no_modify_path: bool, cfg: &Cfg<'_>) ->
     info!("removing rustup home");
 
     // Delete RUSTUP_HOME
-    let rustup_dir = home::rustup_home()?;
+    let rustup_dir = process.rustup_home()?;
     if rustup_dir.exists() {
         utils::remove_dir("rustup_home", &rustup_dir)?;
     }
