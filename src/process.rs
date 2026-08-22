@@ -35,6 +35,8 @@ use crate::{
 };
 
 mod file_source;
+mod home;
+pub(crate) use home::HomeDirs;
 mod terminal_source;
 pub use terminal_source::ColorableTerminal;
 
@@ -74,6 +76,79 @@ impl Process {
 
     pub(crate) fn rustup_home(&self) -> Result<PathBuf> {
         home::env::rustup_home_with_env(self).context("failed to determine rustup home dir")
+    }
+    /// Category mode uses the `RUSTUP_<CATEGORY>_HOME` override, then
+    /// `RUSTUP_HOME`, then the platform default.
+    /// Disabled category mode uses `RUSTUP_HOME` or its legacy default.
+    /// Pseudocode:
+    /// ```text
+    /// if RUSTUP_USE_CATEGORY_HOME is non-empty and != "0" and RUSTUP_<CATEGORY>_HOME is set:
+    ///     return RUSTUP_<CATEGORY>_HOME
+    ///
+    /// if RUSTUP_HOME is set:
+    ///     return RUSTUP_HOME
+    ///
+    /// if RUSTUP_USE_CATEGORY_HOME is non-empty and != "0":
+    ///     if Unix:
+    ///         if XDG_<CATEGORY>_HOME is non-empty and absolute:
+    ///             return XDG_<CATEGORY>_HOME/rustup
+    ///
+    ///         return xdg_default_home(category)/rustup
+    ///
+    ///     if Windows:
+    ///         return windows_category_home(category)/rustup
+    ///
+    /// return $HOME/.rustup
+    /// ```
+    #[allow(dead_code, reason = "split-home interface is not consumed yet")]
+    pub(crate) fn home_dirs(&self) -> io::Result<HomeDirs> {
+        if self.use_category_home() {
+            Ok(HomeDirs {
+                cache: home::category_home(home::HomeCategory::Cache, self)?,
+                config: home::category_home(home::HomeCategory::Config, self)?,
+                data: home::category_home(home::HomeCategory::Data, self)?,
+                state: home::category_home(home::HomeCategory::State, self)?,
+            })
+        } else {
+            let home = home::env::rustup_home_with_env(self)?;
+            Ok(HomeDirs {
+                cache: home.clone(),
+                config: home.clone(),
+                data: home.clone(),
+                state: home,
+            })
+        }
+    }
+
+    /// Returns Cargo's binary installation directory.
+    /// Category mode uses the `CARGO_BIN_HOME` override, then `CARGO_HOME/bin`,
+    /// then the platform default.
+    /// Disabled category mode uses `CARGO_HOME/bin` or its legacy default.
+    /// Pseudocode:
+    /// ```text
+    /// if RUSTUP_USE_CATEGORY_HOME is non-empty and != "0" and CARGO_BIN_HOME is set:
+    ///     return CARGO_BIN_HOME
+    ///
+    /// if CARGO_HOME is set:
+    ///     return CARGO_HOME/bin
+    ///
+    /// if RUSTUP_USE_CATEGORY_HOME is non-empty and != "0":
+    ///     return platform_cargo_bin_home(OS)
+    ///
+    /// return $HOME/.cargo/bin
+    /// ```
+    #[allow(dead_code, reason = "split-home interface is not consumed yet")]
+    pub(crate) fn cargo_bin(&self) -> io::Result<PathBuf> {
+        if self.use_category_home() {
+            home::env::cargo_bin_with_env(self)
+        } else {
+            Ok(home::env::cargo_home_with_env(self)?.join("bin"))
+        }
+    }
+
+    fn use_category_home(&self) -> bool {
+        self.var_os("RUSTUP_USE_CATEGORY_HOME")
+            .is_some_and(|value| value != "0")
     }
 
     pub fn io_thread_count(&self) -> Result<IoThreadCount> {
@@ -420,7 +495,9 @@ pub struct TestContext {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::{assert_matches, fs};
+    use std::{collections::HashMap, path::Path};
 
     use super::*;
     use crate::process::TestProcess;
@@ -441,5 +518,192 @@ mod tests {
         assert_color_choice("AutO", true, ColorChoice::Auto);
         // non-tty + `auto` does not enable the colors.
         assert_color_choice("aUTo", false, ColorChoice::Never);
+    }
+
+    #[test]
+    fn category_mode_disabled_uses_legacy_homes() -> io::Result<()> {
+        let mut vars = HashMap::new();
+        vars.env("HOME", Path::new("/home"));
+        vars.env("RUSTUP_STATE_HOME", Path::new("/split"));
+        vars.env("CARGO_BIN_HOME", Path::new("/split/bin"));
+
+        let process = test_process(Path::new("/work"), vars.clone());
+        assert_eq!(
+            process.home_dirs()?,
+            HomeDirs {
+                cache: "/home/.rustup".into(),
+                config: "/home/.rustup".into(),
+                data: "/home/.rustup".into(),
+                state: "/home/.rustup".into(),
+            }
+        );
+        assert_eq!(process.cargo_bin()?, Path::new("/home/.cargo/bin"));
+
+        vars.env("RUSTUP_HOME", Path::new("/legacy"));
+        vars.env("CARGO_HOME", Path::new("/cargo"));
+        let process = test_process(Path::new("/work"), vars);
+        assert_eq!(
+            process.home_dirs()?,
+            HomeDirs {
+                cache: "/legacy".into(),
+                config: "/legacy".into(),
+                data: "/legacy".into(),
+                state: "/legacy".into(),
+            }
+        );
+        assert_eq!(process.cargo_bin()?, Path::new("/cargo/bin"));
+        Ok(())
+    }
+
+    #[test]
+    fn category_mode_enabled_uses_direct_rustup_precedence() -> io::Result<()> {
+        let cwd = Path::new("/work");
+        let mut vars = HashMap::new();
+        vars.env("RUSTUP_USE_CATEGORY_HOME", "1");
+        vars.env("RUSTUP_STATE_HOME", "state");
+        vars.env("RUSTUP_HOME", "rustup");
+
+        let process = test_process(cwd, vars.clone());
+        let homes = process.home_dirs()?;
+        assert_eq!(homes.cache, Path::new("/work/rustup"));
+        assert_eq!(homes.config, Path::new("/work/rustup"));
+        assert_eq!(homes.data, Path::new("/work/rustup"));
+        assert_eq!(homes.state, Path::new("state"));
+
+        vars.env("RUSTUP_STATE_HOME", "");
+        assert_eq!(
+            test_process(cwd, vars).home_dirs()?,
+            HomeDirs {
+                cache: "/work/rustup".into(),
+                config: "/work/rustup".into(),
+                data: "/work/rustup".into(),
+                state: "/work/rustup".into(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn category_mode_enabled_uses_direct_cargo_precedence() -> io::Result<()> {
+        let cwd = Path::new("/work");
+        let mut vars = HashMap::new();
+        vars.env("RUSTUP_USE_CATEGORY_HOME", "1");
+        vars.env("CARGO_BIN_HOME", "bin");
+        vars.env("CARGO_HOME", "cargo");
+
+        assert_eq!(
+            test_process(cwd, vars.clone()).cargo_bin()?,
+            Path::new("bin")
+        );
+
+        vars.env("CARGO_BIN_HOME", "");
+        assert_eq!(test_process(cwd, vars).cargo_bin()?, cwd.join("cargo/bin"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn category_mode_enabled_uses_unix_platform_defaults() -> io::Result<()> {
+        let mut vars = HashMap::new();
+        vars.env("RUSTUP_USE_CATEGORY_HOME", "1");
+        vars.env("HOME", Path::new("/home"));
+        vars.env("XDG_STATE_HOME", Path::new("/xdg/state"));
+
+        let homes = test_process(Path::new("/work"), vars.clone()).home_dirs()?;
+        assert_eq!(homes.state, Path::new("/xdg/state/rustup"));
+
+        vars.env("XDG_STATE_HOME", Path::new("xdg/state"));
+        let process = TestProcess::new(Path::new("/work"), &[] as &[&str], vars.clone(), "");
+        let homes = process.process.home_dirs()?;
+        assert_eq!(homes.state, Path::new("/home/.local/state/rustup"));
+        assert_eq!(
+            process.stderr(),
+            b"warn: ignoring relative XDG_STATE_HOME path xdg/state; falling back to /home/.local/state\n"
+        );
+
+        vars.env("XDG_STATE_HOME", "");
+        let homes = test_process(Path::new("/work"), vars).home_dirs()?;
+        assert_eq!(homes.state, Path::new("/home/.local/state/rustup"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn category_mode_enabled_ignores_existing_legacy_home() -> io::Result<()> {
+        let home = tempfile::tempdir()?;
+        fs::create_dir(home.path().join(".rustup"))?;
+        let mut vars = HashMap::new();
+        vars.env("RUSTUP_USE_CATEGORY_HOME", "1");
+        vars.env("HOME", home.path());
+
+        let homes = test_process(Path::new("/work"), vars).home_dirs()?;
+        assert_eq!(homes.cache, home.path().join(".cache/rustup"));
+        assert_eq!(homes.config, home.path().join(".config/rustup"));
+        assert_eq!(homes.data, home.path().join(".local/share/rustup"));
+        assert_eq!(homes.state, home.path().join(".local/state/rustup"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn category_mode_enabled_without_home_errors() {
+        let mut vars = HashMap::new();
+        vars.env("RUSTUP_USE_CATEGORY_HOME", "1");
+        let process = test_process(Path::new("/work"), vars);
+
+        assert_matches!(
+            process.home_dirs(),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && error.to_string() == "home directory is not set"
+        );
+        assert_matches!(
+            process.cargo_bin(),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && error.to_string() == "home directory is not set"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn category_mode_enabled_uses_cargo_platform_default() -> io::Result<()> {
+        let mut vars = HashMap::new();
+        vars.env("RUSTUP_USE_CATEGORY_HOME", "1");
+        vars.env("HOME", Path::new("/home"));
+
+        assert_eq!(
+            test_process(Path::new("/work"), vars).cargo_bin()?,
+            Path::new("/home/.local/bin")
+        );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn category_mode_enabled_uses_windows_platform_defaults() -> io::Result<()> {
+        let mut vars = HashMap::new();
+        vars.env("RUSTUP_USE_CATEGORY_HOME", "1");
+        let process = test_process(Path::new(r"C:\work"), vars);
+
+        let homes = process.home_dirs()?;
+        assert!(homes.cache.is_absolute());
+        assert!(homes.config.is_absolute());
+        assert_eq!(homes.config, homes.data);
+        assert_eq!(homes.config, homes.state);
+        assert_ne!(homes.cache, homes.config);
+        for home in [&homes.cache, &homes.config, &homes.data, &homes.state] {
+            assert_eq!(home.file_name(), Some(OsStr::new("rustup")));
+        }
+        assert!(process.cargo_bin()?.is_absolute());
+        Ok(())
+    }
+
+    fn test_process(cwd: &Path, vars: HashMap<String, String>) -> Process {
+        Process::TestProcess(TestContext {
+            cwd: cwd.into(),
+            vars,
+            ..Default::default()
+        })
     }
 }
