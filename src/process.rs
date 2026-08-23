@@ -100,7 +100,6 @@ impl Process {
     ///
     /// return $HOME/.rustup
     /// ```
-    #[allow(dead_code, reason = "split-home interface is not consumed yet")]
     pub(crate) fn home_dirs(&self) -> io::Result<HomeDirs> {
         if self.use_category_home() {
             Ok(HomeDirs {
