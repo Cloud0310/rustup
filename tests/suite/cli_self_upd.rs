@@ -337,6 +337,39 @@ async fn uninstall_deletes_legacy_and_category_binaries() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn uninstall_deletes_legacy_bin_symlink() {
+    let cx = setup_empty_installed().await;
+    let legacy_bin = cx.config.cargodir.join("bin");
+    let category_bin = cx.config.homedir.join("category-bin");
+    fs::create_dir_all(&category_bin).unwrap();
+
+    let rustup_exe = format!("rustup{EXE_SUFFIX}");
+    let legacy_rustup = legacy_bin.join(&rustup_exe);
+    let category_rustup = category_bin.join(&rustup_exe);
+    let category_proxy = category_bin.join(format!("rustc{EXE_SUFFIX}"));
+    let custom_tool = category_bin.join("custom-tool");
+    fs::copy(&legacy_rustup, &category_rustup).unwrap();
+    fs::hard_link(&category_rustup, &category_proxy).unwrap();
+    fs::write(&custom_tool, "").unwrap();
+    remove_dir_all(&legacy_bin).unwrap();
+    raw::symlink_dir(&category_bin, &legacy_bin).unwrap();
+
+    let mut cmd = cx
+        .config
+        .cmd("rustup", ["self", "uninstall", "-y", "--no-modify-path"]);
+    cmd.env("RUSTUP_USE_CATEGORY_HOME", "1");
+    cmd.env("CARGO_BIN_HOME", &category_bin);
+
+    assert!(cmd.output().unwrap().status.success());
+    assert!(fs::symlink_metadata(&legacy_bin).is_err());
+    assert!(!category_rustup.exists());
+    assert!(!category_proxy.exists());
+    assert!(custom_tool.exists());
+    assert!(category_bin.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn uninstall_reuses_paths_after_removing_command_cwd() {
     let mut cx = setup_empty_installed().await;
     let removed_cwd = cx.config.cargodir.join("removed-cwd");

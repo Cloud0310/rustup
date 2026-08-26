@@ -1047,8 +1047,28 @@ fn clean_cargo_home(
 
     info!("removing rustup tool links and binary");
 
-    let legacy_bin_removed = clean_rustup_binaries(&legacy_bin)?;
-    if category_bin != legacy_bin {
+    // Cargo's resolved category bin may differ from the legacy `$CARGO_HOME/bin`.
+    // In that case both locations can contain rustup-managed binaries.
+    let separate_category_bin = category_bin != legacy_bin;
+
+    // Track only whether the legacy bin path was removed. This controls whether
+    // the legacy PATH entry should be removed below.
+    //
+    // A separate legacy bin may be a compatibility symlink to the category bin.
+    // Remove that link directly instead of cleaning through it. A symlink to any
+    // other location may be user-owned, so leave it untouched.
+    let legacy_bin_removed = match (legacy_bin.is_symlink(), separate_category_bin) {
+        (true, true) if is_same_file(&legacy_bin, category_bin).unwrap_or(false) => {
+            utils::remove_dir("cargo bin", &legacy_bin)?;
+            true
+        }
+        (true, true) => false,
+        _ => clean_rustup_binaries(&legacy_bin)?,
+    };
+
+    // The category bin is independent of the legacy bin when the paths differ.
+    // Its removal result does not affect cleanup of the legacy PATH entry.
+    if separate_category_bin {
         clean_rustup_binaries(category_bin)?;
     }
 
