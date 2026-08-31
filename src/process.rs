@@ -1,4 +1,3 @@
-
 #[cfg(feature = "test")]
 use std::{
     collections::HashMap,
@@ -109,7 +108,6 @@ impl Process {
     /// Category mode uses a non-empty `RUSTUP_BIN_HOME`, otherwise the platform
     /// default, with no Cargo home fallback. Legacy mode appends `bin` to the
     /// resolved Cargo home.
-    #[allow(dead_code, reason = "split-home interface is not consumed yet")]
     pub(crate) fn rustup_bin_home(&self) -> io::Result<PathBuf> {
         if self.use_category_home() {
             home::env::rustup_bin_home_with_env(self)
