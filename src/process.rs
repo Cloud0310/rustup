@@ -136,7 +136,6 @@ impl Process {
     ///
     /// return $HOME/.cargo/bin
     /// ```
-    #[allow(dead_code, reason = "split-home interface is not consumed yet")]
     pub(crate) fn cargo_bin(&self) -> io::Result<PathBuf> {
         if self.use_category_home() {
             home::env::cargo_bin_with_env(self)
