@@ -607,6 +607,11 @@ custom
 #[tokio::test]
 async fn fallback_cargo_calls_correct_rustc() {
     let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    let data_home = cx.config.current_dir().join("data");
+    let split_home_env = [
+        ("RUSTUP_DATA_HOME", data_home.to_str().unwrap()),
+        ("RUSTUP_USE_CATEGORY_HOME", "1"),
+    ];
     // Hm, this is the _only_ test that assumes that toolchain proxies
     // exist in CARGO_HOME. Adding that proxy here.
     let rustup_path = cx.config.exedir.join(format!("rustup{EXE_SUFFIX}"));
@@ -619,19 +624,22 @@ async fn fallback_cargo_calls_correct_rustc() {
     let path = cx.config.customdir.join("custom-1");
     let path = path.to_string_lossy();
     cx.config
-        .expect(["rustup", "toolchain", "link", "custom", &path])
+        .expect_with_env(
+            ["rustup", "toolchain", "link", "custom", &path],
+            split_home_env,
+        )
         .await
         .is_ok();
     cx.config
-        .expect(["rustup", "default", "custom"])
+        .expect_with_env(["rustup", "default", "custom"], split_home_env)
         .await
         .is_ok();
     cx.config
-        .expect(["rustup", "update", "nightly"])
+        .expect_with_env(["rustup", "update", "nightly"], split_home_env)
         .await
         .is_ok();
     cx.config
-        .expect(["rustc", "--version"])
+        .expect_with_env(["rustc", "--version"], split_home_env)
         .await
         .with_stdout(snapbox::str![[r#"
 1.0.0 (hash-c-1)
@@ -639,7 +647,7 @@ async fn fallback_cargo_calls_correct_rustc() {
 "#]])
         .is_ok();
     cx.config
-        .expect(["cargo", "--version"])
+        .expect_with_env(["cargo", "--version"], split_home_env)
         .await
         .with_stdout(snapbox::str![[r#"
 1.3.0 (hash-nightly-2)
@@ -654,13 +662,19 @@ async fn fallback_cargo_calls_correct_rustc() {
     // RUSTUP_TOOLCHAIN variable set by the original "cargo" proxy, and
     // interpreted by the nested "rustc" proxy.
     cx.config
-        .expect(["cargo", "--call-rustc"])
+        .expect_with_env(["cargo", "--call-rustc"], split_home_env)
         .await
         .with_stdout(snapbox::str![[r#"
 1.0.0 (hash-c-1)
 
 "#]])
         .is_ok();
+
+    #[cfg(windows)]
+    {
+        assert!(data_home.join("fallback/cargo.exe").is_file());
+        assert!(!cx.config.rustupdir.has("fallback/cargo.exe"));
+    }
 }
 
 // Checks that cargo can recursively invoke itself with rustup shorthand (via
@@ -902,18 +916,24 @@ installed targets:
 }
 
 #[tokio::test]
-async fn notify_release_hint_at_most_once_per_day() {
+async fn notify_release_hint_uses_state_home_at_most_once_per_day() {
     let cx = CliTestContext::new(Scenario::SimpleV2).await;
+    let state_home = cx.config.current_dir().join("relative/state");
+    let state_home_env = state_home.to_str().unwrap();
+    let state_env = [
+        ("RUSTUP_STATE_HOME", state_home_env),
+        ("RUSTUP_USE_CATEGORY_HOME", "1"),
+    ];
     cx.config
-        .expect(["rustup", "set", "release-hint", "enable"])
+        .expect_with_env(["rustup", "set", "release-hint", "enable"], state_env)
         .await
         .is_ok();
     cx.config
-        .expect(["rustup", "update", "stable"])
+        .expect_with_env(["rustup", "update", "stable"], state_env)
         .await
         .is_ok();
     cx.config
-        .expect(["rustup", "show"])
+        .expect_with_env(["rustup", "show"], state_env)
         .await
         .with_stderr(snapbox::str![[r#"
 hint: a new stable Rust release is available, run `rustup update stable` to install it
@@ -921,10 +941,22 @@ hint: a new stable Rust release is available, run `rustup update stable` to inst
 "#]])
         .is_ok();
     cx.config
-        .expect(["rustup", "show"])
+        .expect_with_env(["rustup", "show"], state_env)
         .await
         .with_stderr(snapbox::str![[""]])
         .is_ok();
+    assert!(state_home.join("state.toml").is_file());
+    assert!(!cx.config.rustupdir.has("state.toml"));
+
+    let rustc = cx
+        .config
+        .expect_with_env(
+            ["rustc", "+stable", "--echo-env", "RUSTUP_STATE_HOME"],
+            state_env,
+        )
+        .await;
+    rustc.is_ok();
+    assert_eq!(rustc.output.stderr.trim(), state_home.to_string_lossy());
 }
 
 #[tokio::test]
@@ -3372,7 +3404,7 @@ async fn rustup_toolchain_source_cli() {
         .await
         .is_ok();
     cx.config
-        .expect(["cargo", "+nightly", "--echo-rustup-toolchain-source"])
+        .expect(["cargo", "+nightly", "--echo-env", "RUSTUP_TOOLCHAIN_SOURCE"])
         .await
         .with_stderr(snapbox::str![[r#"
 ...
@@ -3386,7 +3418,7 @@ async fn rustup_toolchain_source_env() {
     let cx = CliTestContext::new(Scenario::SimpleV2).await;
     cx.config
         .expect_with_env(
-            ["cargo", "--echo-rustup-toolchain-source"],
+            ["cargo", "--echo-env", "RUSTUP_TOOLCHAIN_SOURCE"],
             [("RUSTUP_TOOLCHAIN", "nightly")],
         )
         .await
@@ -3405,7 +3437,7 @@ async fn rustup_toolchain_source_path_override() {
         .await
         .is_ok();
     cx.config
-        .expect(["cargo", "--echo-rustup-toolchain-source"])
+        .expect(["cargo", "--echo-env", "RUSTUP_TOOLCHAIN_SOURCE"])
         .await
         .with_stderr(snapbox::str![[r#"
 ...
@@ -3420,7 +3452,7 @@ async fn rustup_toolchain_source_toolchain_file() {
     let toolchain_file = cx.config.current_dir().join("rust-toolchain.toml");
     raw::write_file(&toolchain_file, "[toolchain]\nchannel='nightly'").unwrap();
     cx.config
-        .expect(["cargo", "--echo-rustup-toolchain-source"])
+        .expect(["cargo", "--echo-env", "RUSTUP_TOOLCHAIN_SOURCE"])
         .await
         .with_stderr(snapbox::str![[r#"
 ...
@@ -3437,7 +3469,7 @@ async fn rustup_toolchain_source_default() {
         .await
         .is_ok();
     cx.config
-        .expect(["cargo", "--echo-rustup-toolchain-source"])
+        .expect(["cargo", "--echo-env", "RUSTUP_TOOLCHAIN_SOURCE"])
         .await
         .with_stderr(snapbox::str![[r#"
 ...
@@ -4549,4 +4581,275 @@ installed targets:
   [HOST_TUPLE]
 
 "#]]);
+}
+
+#[tokio::test]
+async fn pin_default() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+
+    let mut toml_redactions = snapbox::Redactions::new();
+    toml_redactions
+        .insert("[HOST_TUPLE]", this_host_tuple())
+        .unwrap();
+    let toml_assert = snapbox::Assert::new()
+        .action_env(snapbox::assert::DEFAULT_ACTION_ENV)
+        .redact_with(toml_redactions);
+
+    cx.config
+        .expect(["rustup", "default", "beta"])
+        .await
+        .is_ok();
+
+    cx.config
+        .expect(["rustup", "toolchain", "pin"])
+        .await
+        .is_ok();
+
+    let toolchain_file = &cx.config.current_dir().join("rust-toolchain.toml");
+    toml_assert.eq(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "beta"
+components = ["cargo", "rust-docs", "rust-std", "rustc"]
+
+"#]],
+    );
+
+    fs::remove_file(toolchain_file).unwrap();
+    cx.config
+        .expect(["rustup", "toolchain", "pin", "--qualified"])
+        .await
+        .is_ok();
+    toml_assert.eq(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "beta-[HOST_TUPLE]"
+components = ["cargo", "rust-docs", "rust-std", "rustc"]
+
+"#]],
+    );
+}
+
+#[tokio::test]
+async fn pin_dir_override() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+
+    let mut toml_redactions = snapbox::Redactions::new();
+    toml_redactions
+        .insert("[HOST_TUPLE]", this_host_tuple())
+        .unwrap();
+    let toml_assert = snapbox::Assert::new()
+        .action_env(snapbox::assert::DEFAULT_ACTION_ENV)
+        .redact_with(toml_redactions);
+
+    cx.config
+        .expect(["rustup", "install", "beta"])
+        .await
+        .is_ok();
+
+    cx.config
+        .expect(["rustup", "default", "stable"])
+        .await
+        .is_ok();
+
+    cx.config
+        .expect(["rustup", "override", "set", "beta"])
+        .await
+        .is_ok();
+
+    cx.config
+        .expect(["rustup", "toolchain", "pin"])
+        .await
+        .is_ok();
+
+    let toolchain_file = &cx.config.current_dir().join("rust-toolchain.toml");
+    toml_assert.eq(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "beta"
+
+"#]],
+    );
+
+    fs::remove_file(toolchain_file).unwrap();
+    cx.config
+        .expect(["rustup", "toolchain", "pin", "--qualified"])
+        .await
+        .is_ok();
+    toml_assert.eq(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "beta-[HOST_TUPLE]"
+
+"#]],
+    );
+}
+
+#[tokio::test]
+async fn pin_env_plus_override() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+
+    let mut toml_redactions = snapbox::Redactions::new();
+    toml_redactions
+        .insert("[HOST_TUPLE]", this_host_tuple())
+        .unwrap();
+    let toml_assert = snapbox::Assert::new()
+        .action_env(snapbox::assert::DEFAULT_ACTION_ENV)
+        .redact_with(toml_redactions);
+
+    cx.config
+        .expect(["rustup", "install", "beta"])
+        .await
+        .is_ok();
+
+    cx.config
+        .expect(["rustup", "default", "stable"])
+        .await
+        .is_ok();
+
+    cx.config
+        .expect(["rustup", "+beta", "toolchain", "pin"])
+        .await
+        .is_ok();
+
+    let toolchain_file = &cx.config.current_dir().join("rust-toolchain.toml");
+    toml_assert.eq(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "beta"
+
+"#]],
+    );
+
+    fs::remove_file(toolchain_file).unwrap();
+    cx.config
+        .expect_with_env(
+            ["rustup", "toolchain", "pin"],
+            [("RUSTUP_TOOLCHAIN", "beta")],
+        )
+        .await
+        .is_ok();
+    toml_assert.eq(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "beta"
+
+"#]],
+    );
+
+    fs::remove_file(toolchain_file).unwrap();
+    cx.config
+        .expect(["rustup", "+beta", "toolchain", "pin", "--qualified"])
+        .await
+        .is_ok();
+    toml_assert.eq(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "beta-[HOST_TUPLE]"
+
+"#]],
+    );
+
+    fs::remove_file(toolchain_file).unwrap();
+    cx.config
+        .expect_with_env(
+            ["rustup", "toolchain", "pin", "--qualified"],
+            [("RUSTUP_TOOLCHAIN", "beta")],
+        )
+        .await
+        .is_ok();
+    toml_assert.eq(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "beta-[HOST_TUPLE]"
+
+"#]],
+    );
+}
+
+#[tokio::test]
+async fn pin_invalid_active_toolchain() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+
+    cx.config
+        .expect(["rustup", "default", "none"])
+        .await
+        .is_ok();
+
+    cx.config
+        .expect(["rustup", "toolchain", "pin"])
+        .await
+        .is_err()
+        .with_stderr(snapbox::str![[r#"
+error: no default toolchain to pin
+
+"#]]);
+
+    cx.config
+        .expect_with_env(
+            ["rustup", "toolchain", "pin"],
+            [("RUSTUP_TOOLCHAIN", "none")],
+        )
+        .await
+        .is_err()
+        .with_stderr(snapbox::str![[r#"
+error: invalid toolchain name 'none'
+
+"#]]);
+}
+
+#[tokio::test]
+async fn pin_existing_toolchain_toml() {
+    let cx = CliTestContext::new(Scenario::SimpleV2).await;
+
+    cx.config
+        .expect(["rustup", "install", "stable"])
+        .await
+        .is_ok();
+
+    let toolchain_file = &cx.config.current_dir().join("rust-toolchain.toml");
+    fs::write(toolchain_file, r#"toolchain.channel = "beta""#).unwrap();
+
+    cx.config
+        .expect(["rustup", "toolchain", "pin"])
+        .await
+        .is_err()
+        .with_stderr(snapbox::str![[r#"
+error: found existing override file at 'rust-toolchain.toml', refusing to overwrite
+
+"#]]);
+
+    fs::remove_file(toolchain_file).unwrap();
+    cx.config
+        .expect(["rustup", "toolchain", "pin"])
+        .await
+        .is_ok()
+        .with_stderr(snapbox::str![[r#""#]]);
+
+    snapbox::assert_data_eq!(
+        fs::read_to_string(toolchain_file).unwrap(),
+        snapbox::str![[r#"
+...
+[toolchain]
+channel = "stable"
+components = ["cargo", "rust-docs", "rust-std", "rustc"]
+
+"#]],
+    );
 }
