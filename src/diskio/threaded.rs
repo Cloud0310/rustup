@@ -97,11 +97,43 @@ impl fmt::Debug for Pool {
 
 pub(super) struct Threaded {
     n_files: Arc<AtomicUsize>,
-    pool: threadpool::ThreadPool,
+    pool: Workers,
     rx: Receiver<Task>,
     tx: Sender<Task>,
     vec_pools: EnumMap<Bucket, Pool>,
     ram_budget: usize,
+}
+
+enum Workers {
+    Threads(threadpool::ThreadPool),
+    #[cfg(feature = "async-io-poc")]
+    Tokio(super::tokio_pool::TokioPool),
+}
+
+impl Workers {
+    fn execute(&self, work: impl FnOnce() + Send + 'static) {
+        match self {
+            Self::Threads(pool) => pool.execute(work),
+            #[cfg(feature = "async-io-poc")]
+            Self::Tokio(pool) => pool.execute(work),
+        }
+    }
+
+    fn queued_count(&self) -> usize {
+        match self {
+            Self::Threads(pool) => pool.queued_count(),
+            #[cfg(feature = "async-io-poc")]
+            Self::Tokio(pool) => pool.queued_count(),
+        }
+    }
+
+    fn join(&self) {
+        match self {
+            Self::Threads(pool) => pool.join(),
+            #[cfg(feature = "async-io-poc")]
+            Self::Tokio(pool) => pool.join(),
+        }
+    }
 }
 
 impl Threaded {
@@ -116,6 +148,22 @@ impl Threaded {
             .num_threads(thread_count)
             .thread_stack_size(1_048_576)
             .build();
+        Self::with_workers(Workers::Threads(pool), ram_budget)
+    }
+
+    #[cfg(feature = "async-io-poc")]
+    pub(super) fn new_tokio(
+        thread_count: usize,
+        ram_budget: usize,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        Self::with_workers(
+            Workers::Tokio(super::tokio_pool::TokioPool::new(thread_count, runtime)),
+            ram_budget,
+        )
+    }
+
+    fn with_workers(pool: Workers, ram_budget: usize) -> Self {
         let (tx, rx) = channel();
         let vec_pools = enum_map! {
             Bucket::FourK => Pool{
@@ -184,7 +232,7 @@ impl Threaded {
                 super::Kind::File(content) => content.len(),
                 super::Kind::IncrementalFile(_) => return,
             },
-            CompletedIo::Chunk(_) => super::IO_CHUNK_SIZE,
+            CompletedIo::Chunk(_, _) => super::IO_CHUNK_SIZE,
         };
         let bucket = self.find_bucket(size);
         let pool = &self.vec_pools[bucket];
@@ -196,11 +244,26 @@ impl Threaded {
         self.n_files.fetch_add(1, Ordering::Relaxed);
         let n_files = self.n_files.clone();
         self.pool.execute(move || {
-            let chunk_complete_callback = |size| {
-                tx.send(Task::Request(CompletedIo::Chunk(size)))
-                    .expect("receiver should be listening")
+            let chunk_complete_callback = |buffer: super::FileBuffer| {
+                // Drop the final slab guard on the allocating thread. Dropping
+                // it here would put the slot on the remote free list, which
+                // sharded_slab only reuses after exhausting the local page.
+                // The budget counts buffers, not all those unused page slots.
+                tx.send(Task::Request(CompletedIo::Chunk(
+                    buffer.len(),
+                    Some(buffer),
+                )))
+                .expect("receiver should be listening")
             };
-            perform(&mut item, chunk_complete_callback);
+            // Always send a completion, even on panic, so backpressure and
+            // cleanup cannot wait forever for a missing acknowledgement.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                perform(&mut item, chunk_complete_callback);
+            }))
+            .is_err()
+            {
+                item.result = Err(std::io::Error::other("disk worker panicked"));
+            }
             n_files.fetch_sub(1, Ordering::Relaxed);
             tx.send(Task::Request(CompletedIo::Item(item)))
                 .expect("receiver should be listening");
@@ -261,11 +324,15 @@ impl Executor for Threaded {
         // Cheap wrap-around correctness check - we have 20k files, more than
         // 32K means we subtracted from 0 somewhere.
         assert!(32767 > prev_files);
-        let mut current_files = prev_files;
-        while current_files != 0 {
-            use std::thread::sleep;
-            sleep(std::time::Duration::from_millis(100));
-            current_files = self.n_files.load(Ordering::Relaxed);
+        // Keep the reference backend unchanged for the performance comparison.
+        // Tokio's barrier awaits actual completions instead of polling at 100ms.
+        if matches!(self.pool, Workers::Threads(_)) {
+            let mut current_files = prev_files;
+            while current_files != 0 {
+                use std::thread::sleep;
+                sleep(std::time::Duration::from_millis(100));
+                current_files = self.n_files.load(Ordering::Relaxed);
+            }
         }
         self.pool.join();
 
@@ -354,7 +421,10 @@ impl JoinIterator<'_> {
                             break None;
                         }
                     }
-                    Task::Request(item) => {
+                    Task::Request(mut item) => {
+                        if let CompletedIo::Chunk(_, buffer) = &mut item {
+                            drop(buffer.take());
+                        }
                         self.executor.reclaim(&item);
                         break Some(item);
                     }
@@ -399,7 +469,10 @@ impl Iterator for SubmitIterator<'_> {
             None
         } else {
             for task in self.executor.rx.iter() {
-                if let Task::Request(item) = task {
+                if let Task::Request(mut item) = task {
+                    if let CompletedIo::Chunk(_, buffer) = &mut item {
+                        drop(buffer.take());
+                    }
                     self.executor.reclaim(&item);
                     return Some(item);
                 }

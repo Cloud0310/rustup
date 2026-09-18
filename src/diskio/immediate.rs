@@ -49,7 +49,11 @@ impl ImmediateUnpacker {
                 // Case 2: pending chunks (which might be empty)
                 let mut completed_chunks = vec![];
                 completed_chunks.append(&mut state.completed_chunks);
-                Box::new(completed_chunks.into_iter().map(CompletedIo::Chunk))
+                Box::new(
+                    completed_chunks
+                        .into_iter()
+                        .map(|size| CompletedIo::Chunk(size, None)),
+                )
             }
         } else {
             Box::new(None.into_iter())

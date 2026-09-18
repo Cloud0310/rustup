@@ -43,7 +43,7 @@ fn test_incremental_file(io_threads: &str) -> anyhow::Result<()> {
     loop {
         for work in io_executor.completed().collect::<Vec<_>>() {
             match work {
-                super::CompletedIo::Chunk(size) => written += size,
+                super::CompletedIo::Chunk(size, _) => written += size,
                 super::CompletedIo::Item(item) => unreachable!("{:?}", item),
             }
         }
@@ -58,7 +58,7 @@ fn test_incremental_file(io_threads: &str) -> anyhow::Result<()> {
     loop {
         for work in io_executor.completed().collect::<Vec<_>>() {
             match work {
-                super::CompletedIo::Chunk(_) => {}
+                super::CompletedIo::Chunk(_, _) => {}
                 super::CompletedIo::Item(_) => {
                     file_finished = true;
                 }
@@ -106,7 +106,7 @@ fn test_complete_file(io_threads: &str) -> anyhow::Result<()> {
     for work in io_executor.execute(item).collect::<Vec<_>>() {
         // The file might complete immediately
         match work {
-            super::CompletedIo::Chunk(size) => unreachable!("{:?}", size),
+            super::CompletedIo::Chunk(size, _) => unreachable!("{:?}", size),
             super::CompletedIo::Item(item) => {
                 check_item(item);
                 finished = true;
@@ -117,7 +117,7 @@ fn test_complete_file(io_threads: &str) -> anyhow::Result<()> {
         loop {
             for work in io_executor.completed().collect::<Vec<_>>() {
                 match work {
-                    super::CompletedIo::Chunk(size) => unreachable!("{:?}", size),
+                    super::CompletedIo::Chunk(size, _) => unreachable!("{:?}", size),
                     super::CompletedIo::Item(item) => {
                         check_item(item);
                         finished = true;
@@ -159,6 +159,58 @@ fn test_complete_file_immediate() {
 #[test]
 fn test_complete_file_threaded() {
     test_complete_file("2").unwrap()
+}
+
+#[test]
+fn incremental_chunks_reuse_the_allocated_slab_buffer() {
+    use std::time::{Duration, Instant};
+
+    let work = test_dir().unwrap();
+    let mut executor = get_executor(
+        32 * 1024 * 1024,
+        crate::process::IoThreadCount::UserSpecified(2),
+    );
+    let (item, mut sender) = Item::write_file_segmented(
+        work.path().join("stream"),
+        0o644,
+        executor.incremental_file_state(),
+    )
+    .unwrap();
+    executor.execute(item).for_each(drop);
+    let mut previous = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for _ in 0..16 {
+        while !executor.buffer_available(super::IO_CHUNK_SIZE) {
+            assert!(Instant::now() < deadline);
+            executor.completed().for_each(drop);
+            std::thread::yield_now();
+        }
+        let mut buffer = executor.get_buffer(super::IO_CHUNK_SIZE);
+        // Check actual reuse, not merely the bookkeeping counter. A slab
+        // OwnedRef must be marked clear before drop to make its slot reusable.
+        if let Some(pointer) = previous {
+            assert_eq!(buffer.as_ptr(), pointer);
+        }
+        previous = Some(buffer.as_ptr());
+        buffer.extend_from_slice(b"chunk");
+        assert!(sender.submit(buffer.finished()));
+    }
+    while !executor.buffer_available(super::IO_CHUNK_SIZE) {
+        assert!(Instant::now() < deadline);
+        executor.completed().for_each(drop);
+        std::thread::yield_now();
+    }
+    assert!(sender.submit(executor.get_buffer(super::IO_CHUNK_SIZE).finished()));
+    for completed in executor.join() {
+        if let super::CompletedIo::Item(item) = completed {
+            item.result.unwrap();
+        }
+    }
+    assert_eq!(executor.buffer_used(), 0);
+    assert_eq!(
+        std::fs::read(work.path().join("stream")).unwrap(),
+        b"chunk".repeat(16)
+    );
 }
 
 #[test]

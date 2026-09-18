@@ -231,7 +231,7 @@ enum DirStatus {
     Pending(Vec<Item>),
 }
 
-fn unpack_without_first_dir<R: Read>(
+pub(crate) fn unpack_without_first_dir<R: Read>(
     archive: &mut tar::Archive<R>,
     path: &Path,
     mut io_executor: Box<dyn Executor>,
@@ -361,6 +361,12 @@ fn unpack_without_first_dir<R: Read>(
         let mut incremental_file_sender = None;
         let mut item = match kind {
             EntryType::Directory => {
+                // A parent may already have been created implicitly, or its
+                // creation may still be in flight. Do not replace its pending
+                // children or schedule a second completion for the same path.
+                if directories.contains_key(&full_path) {
+                    continue 'entries;
+                }
                 directories.insert(full_path.to_owned(), DirStatus::Pending(Vec::new()));
                 Item::make_dir(full_path.clone(), mode)
             }

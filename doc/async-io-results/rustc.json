@@ -1,0 +1,64 @@
+{
+  "environment": {
+    "platform": "Linux-7.2.6-1-cachyos-x86_64-with-glibc2.44",
+    "python": "3.14.7 (main, Aug 14 2026, 06:38:32) [GCC 16.2.1 20260810]",
+    "logical_cpus": 16,
+    "work_dir": "/home/cloud/Documents/projects/rustup/target/async-io-rustc-verified",
+    "revision": "615e345a3fb1e067b43f043029f3bdb0b57bc189",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "binary": "/home/cloud/Documents/projects/rustup/target/release/examples/async-io-poc",
+    "cache": "warm input; fresh output directory",
+    "binary_sha256": "eca2a644afaa9840d2e5075e6dd2d0fa512e3207df44e4e9a398a63717da53b7",
+    "cargo_lock_sha256": "60427b0fbc403b95a2feaeea5a6ab31cfcf5598cb8eab032dd921d56c4e2f35d"
+  },
+  "inputs": [
+    {
+      "path": "/home/cloud/Documents/projects/rustup/target/async-io-real/rustc-1.90.0-x86_64-unknown-linux-gnu.tar.xz",
+      "bytes": 82519204,
+      "sha256": "48c2a42de9e92fcae8c24568f5fe40d5734696a6f80e83cc6d46eef1a78f13c9"
+    }
+  ],
+  "gate": {
+    "wall_upper95": 1.05,
+    "cpu_upper95": 1.1,
+    "rss_median_ratio": 1.1
+  },
+  "cases": [
+    {
+      "case": "rustc-1.90.0-x86_64-unknown-linux-gnu.tar.xz/threads=4/ram=64MiB",
+      "rounds": 9,
+      "output": [
+        52,
+        386665180,
+        "cb5b60df96dc91473205a6dec048946c04d0ba6e2556c1364f7a04bb2b937c7a"
+      ],
+      "metrics": {
+        "seconds": {
+          "threaded_median": 2.786855583,
+          "tokio_median": 2.678893744,
+          "paired_ratio_median": 0.960257659817399,
+          "paired_ratio_upper95": 0.9642934504974794,
+          "threaded_p95": 2.816911793,
+          "tokio_p95": 2.688197223
+        },
+        "cpu_seconds": {
+          "threaded_median": 2.734657,
+          "tokio_median": 2.727621,
+          "paired_ratio_median": 0.9956124210219339,
+          "paired_ratio_upper95": 1.0000417717066308,
+          "threaded_p95": 2.765783,
+          "tokio_p95": 2.736588
+        },
+        "rss_kib": {
+          "threaded_median": 110980,
+          "tokio_median": 111432,
+          "paired_ratio_median": 1.0002870882078518,
+          "paired_ratio_upper95": 1.0086899847925266,
+          "threaded_p95": 114144,
+          "tokio_p95": 114072
+        }
+      },
+      "pass": true
+    }
+  ]
+}

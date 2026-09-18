@@ -1,0 +1,15 @@
+{
+  "Cargo.toml": "90b5315b75dfaacc73c072c71008c4436a24f9ab8a611b637d84201fe53bcdc5",
+  "Cargo.lock": "60427b0fbc403b95a2feaeea5a6ab31cfcf5598cb8eab032dd921d56c4e2f35d",
+  "src/lib.rs": "d6d2f788f1768763b5b02ed6f625c073ecf89b91b305e28260cf32d96228ecf1",
+  "src/diskio/mod.rs": "bb3c64e95bd2702c806479f41bdff76513b465eb30135e24922b2cb4c36bbc15",
+  "src/diskio/threaded.rs": "023af0317e4e042e6cbefaf493e93c103214d7666e37d9694bf520bda8602ce7",
+  "src/diskio/immediate.rs": "667ec36ce6ab4f21bac9ccfe6f96c6dc2e87b0d0fb272e6d972958771edb873c",
+  "src/diskio/poc.rs": "49cd9e42f562963e112eaf7f89f0d27262d3299cb46d37c022329f4375134afe",
+  "src/diskio/tokio_pool.rs": "52d0d7977bd313febca3903e64da5f2bd796d65673d64303d837fcd3014f8dd4",
+  "src/diskio/test.rs": "36c26016e972ca56fa9e4039f6afbd27f794cd578bfb24100185254f2164dc58",
+  "src/diskio/poc_tests.rs": "8af57b15bd2f463ae2969659085799bb34025483b5fc5552f2aad4d100386f5f",
+  "src/dist/component/package.rs": "4dd96a2342ccba86012b6b4028db69802421e8e62dd443122feb30d7c9c8a2bf",
+  "examples/async-io-poc.rs": "d1571fc6740704e7e2074fefa359a78dc6ee4604a6a241ddfa9d868930f7c203",
+  "scripts/bench-async-io.py": "192f0cf94a4b47828252da1d0818df0d392fcdf0997252a513462959f75e2982"
+}

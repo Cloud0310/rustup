@@ -70,6 +70,8 @@ mod anchors;
 mod command;
 mod config;
 mod diskio;
+#[cfg(feature = "async-io-poc")]
+pub use diskio::poc as async_io_poc;
 pub mod dist;
 mod download;
 pub mod env_var;

@@ -11,6 +11,9 @@ build = "build.rs"
 [features]
 default = ["reqwest-native-tls", "reqwest-rustls-tls"]
 
+# Experimental disk scheduler and comparison harness; never selected by the CLI.
+async-io-poc = []
+
 vendored-openssl = ['openssl/vendored']
 
 reqwest-native-tls = ["reqwest/native-tls", "dep:reqwest", "dep:env_proxy"]
@@ -163,6 +166,10 @@ wildcard_imports = "warn"
 [lib]
 name = "rustup"
 path = "src/lib.rs"
+
+[[example]]
+name = "async-io-poc"
+required-features = ["async-io-poc"]
 
 [profile.release]
 codegen-units = 1

@@ -74,9 +74,15 @@ use crate::{
 };
 
 mod immediate;
+#[cfg(feature = "async-io-poc")]
+pub mod poc;
+#[cfg(all(test, feature = "async-io-poc"))]
+mod poc_tests;
 #[cfg(test)]
 mod test;
 mod threaded;
+#[cfg(feature = "async-io-poc")]
+mod tokio_pool;
 use threaded::PoolReference;
 
 /// Carries the implementation specific data for complete file transfers into the executor.
@@ -215,7 +221,7 @@ pub(super) enum CompletedIo {
     Item(Item),
     /// An IncrementalFile has completed a single chunk
     #[allow(dead_code)] // chunk size only used in test code
-    Chunk(usize),
+    Chunk(usize, Option<FileBuffer>),
 }
 
 impl Item {
@@ -352,7 +358,7 @@ pub(super) trait Executor: Send {
 
 /// Trivial single threaded IO to be used from executors.
 /// (Crazy sophisticated ones can obviously ignore this)
-fn perform<F: Fn(usize)>(item: &mut Item, chunk_complete_callback: F) {
+fn perform<F: Fn(FileBuffer)>(item: &mut Item, chunk_complete_callback: F) {
     // directories: make them, TODO: register with the dir existence cache.
     // Files, write them.
     item.result = match &mut item.kind {
@@ -404,7 +410,7 @@ fn write_file<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C, mode: u32) -
 }
 
 #[allow(unused_variables)]
-fn write_file_incremental<P: AsRef<Path>, F: Fn(usize)>(
+fn write_file_incremental<P: AsRef<Path>, F: Fn(FileBuffer)>(
     path: P,
     content_callback: &mut IncrementalFile,
     mode: u32,
@@ -424,21 +430,29 @@ fn write_file_incremental<P: AsRef<Path>, F: Fn(usize)>(
     };
     if let IncrementalFile::ThreadedReceiver(recv) = content_callback {
         loop {
-            // We unwrap here because the documented only reason for recv to fail is a close by the sender, which is reading
-            // from the tar file: a failed read there will propagate the error in the main thread directly.
-            let contents = recv.recv().unwrap();
+            // A truncated archive can drop the producer before EOF. Report the
+            // error normally so the executor still accounts for this item and
+            // joins its workers before the temporary directory is removed.
+            let mut contents = recv.recv().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "file producer closed before EOF",
+                )
+            })?;
+            // Mark the slab slot for reuse after the last guard is dropped,
+            // just as for whole-file writes. Merely dropping an OwnedRef does
+            // not clear a sharded_slab entry, despite budget acknowledgement.
+            contents.clear();
             let len = contents.len();
             // Length 0 vector is used for clean EOF signalling.
             if len == 0 {
                 trace_scoped!("EOF_chunk", "name": path_display, "len": len);
-                drop(contents);
-                chunk_complete_callback(len);
+                chunk_complete_callback(contents);
                 break;
             } else {
                 trace_scoped!("write_segment", "name": path_display, "len": len);
                 f.write_all(&contents)?;
-                drop(contents);
-                chunk_complete_callback(len);
+                chunk_complete_callback(contents);
             }
         }
     } else {

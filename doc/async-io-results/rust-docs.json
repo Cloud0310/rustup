@@ -1,0 +1,136 @@
+{
+  "environment": {
+    "platform": "Linux-7.2.6-1-cachyos-x86_64-with-glibc2.44",
+    "python": "3.14.7 (main, Aug 14 2026, 06:38:32) [GCC 16.2.1 20260810]",
+    "logical_cpus": 16,
+    "work_dir": "/home/cloud/Documents/projects/rustup/target/async-io-real-verified",
+    "revision": "615e345a3fb1e067b43f043029f3bdb0b57bc189",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "binary": "/home/cloud/Documents/projects/rustup/target/release/examples/async-io-poc",
+    "cache": "warm input; fresh output directory",
+    "binary_sha256": "eca2a644afaa9840d2e5075e6dd2d0fa512e3207df44e4e9a398a63717da53b7",
+    "cargo_lock_sha256": "60427b0fbc403b95a2feaeea5a6ab31cfcf5598cb8eab032dd921d56c4e2f35d"
+  },
+  "inputs": [
+    {
+      "path": "/home/cloud/Documents/projects/rustup/target/async-io-real/rust-docs-1.90.0-x86_64-unknown-linux-gnu.tar.xz",
+      "bytes": 21485344,
+      "sha256": "a974e85394ef832b14b0b3d0053e265ee3d4fb831b21395eef6124c47a986afe"
+    }
+  ],
+  "gate": {
+    "wall_upper95": 1.05,
+    "cpu_upper95": 1.1,
+    "rss_median_ratio": 1.1
+  },
+  "cases": [
+    {
+      "case": "rust-docs-1.90.0-x86_64-unknown-linux-gnu.tar.xz/threads=1/ram=64MiB",
+      "rounds": 9,
+      "output": [
+        47153,
+        589418818,
+        "758cbb0378a82eaeee803f15178a9a6441401ba7c7c17680319e6f172f3437aa"
+      ],
+      "metrics": {
+        "seconds": {
+          "threaded_median": 2.810274861,
+          "tokio_median": 2.793734378,
+          "paired_ratio_median": 0.9973476053252529,
+          "paired_ratio_upper95": 1.0080418581239,
+          "threaded_p95": 2.864071875,
+          "tokio_p95": 2.853409733
+        },
+        "cpu_seconds": {
+          "threaded_median": 2.209883,
+          "tokio_median": 2.214738,
+          "paired_ratio_median": 1.005648437417917,
+          "paired_ratio_upper95": 1.0114847709132113,
+          "threaded_p95": 2.232613,
+          "tokio_p95": 2.323873
+        },
+        "rss_kib": {
+          "threaded_median": 81928,
+          "tokio_median": 81872,
+          "paired_ratio_median": 0.9997559547051933,
+          "paired_ratio_upper95": 1.0001952934283762,
+          "threaded_p95": 81980,
+          "tokio_p95": 81952
+        }
+      },
+      "pass": true
+    },
+    {
+      "case": "rust-docs-1.90.0-x86_64-unknown-linux-gnu.tar.xz/threads=4/ram=64MiB",
+      "rounds": 9,
+      "output": [
+        47153,
+        589418818,
+        "758cbb0378a82eaeee803f15178a9a6441401ba7c7c17680319e6f172f3437aa"
+      ],
+      "metrics": {
+        "seconds": {
+          "threaded_median": 2.547218365,
+          "tokio_median": 2.458539315,
+          "paired_ratio_median": 0.9672512561087727,
+          "paired_ratio_upper95": 1.0111986523368572,
+          "threaded_p95": 2.712115721,
+          "tokio_p95": 2.704254409
+        },
+        "cpu_seconds": {
+          "threaded_median": 3.264296,
+          "tokio_median": 3.255632,
+          "paired_ratio_median": 1.0073623739803788,
+          "paired_ratio_upper95": 1.016443791139549,
+          "threaded_p95": 3.493477,
+          "tokio_p95": 3.585076
+        },
+        "rss_kib": {
+          "threaded_median": 108632,
+          "tokio_median": 104520,
+          "paired_ratio_median": 1.0032719254570026,
+          "paired_ratio_upper95": 1.0069298396828132,
+          "threaded_p95": 116020,
+          "tokio_p95": 116832
+        }
+      },
+      "pass": true
+    },
+    {
+      "case": "rust-docs-1.90.0-x86_64-unknown-linux-gnu.tar.xz/threads=8/ram=64MiB",
+      "rounds": 9,
+      "output": [
+        47153,
+        589418818,
+        "758cbb0378a82eaeee803f15178a9a6441401ba7c7c17680319e6f172f3437aa"
+      ],
+      "metrics": {
+        "seconds": {
+          "threaded_median": 2.63006098,
+          "tokio_median": 2.518846309,
+          "paired_ratio_median": 0.9526911497694628,
+          "paired_ratio_upper95": 0.9758412242207195,
+          "threaded_p95": 2.818954091,
+          "tokio_p95": 2.572035403
+        },
+        "cpu_seconds": {
+          "threaded_median": 4.027392,
+          "tokio_median": 4.058244,
+          "paired_ratio_median": 1.0085376059507924,
+          "paired_ratio_upper95": 1.035760947103029,
+          "threaded_p95": 4.057661,
+          "tokio_p95": 4.162803
+        },
+        "rss_kib": {
+          "threaded_median": 108180,
+          "tokio_median": 108164,
+          "paired_ratio_median": 0.9973762979934223,
+          "paired_ratio_upper95": 1.0421872103799814,
+          "threaded_p95": 121060,
+          "tokio_p95": 118364
+        }
+      },
+      "pass": true
+    }
+  ]
+}
