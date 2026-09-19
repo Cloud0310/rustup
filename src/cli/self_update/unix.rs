@@ -147,23 +147,6 @@ pub(crate) fn self_replace(process: &Process) -> anyhow::Result<utils::ExitCode>
     Ok(utils::ExitCode(0))
 }
 
-fn remove_legacy_source_command(source_cmd: String, rcfiles: &[PathBuf]) -> anyhow::Result<()> {
-    let cmd_bytes = source_cmd.into_bytes();
-    for rc in rcfiles.iter().filter(|rc| rc.is_file()) {
-        let file = utils::read_file("rcfile", rc)?;
-        let file_bytes = file.into_bytes();
-        // FIXME: This is whitespace sensitive where it should not be.
-        if let Some(idx) = find_exact_line(&file_bytes, &cmd_bytes) {
-            // Here we rewrite the file without the offending line.
-            let mut new_bytes = file_bytes[..idx].to_vec();
-            new_bytes.extend(&file_bytes[idx + cmd_bytes.len()..]);
-            let new_file = String::from_utf8(new_bytes).unwrap();
-            utils::write_file("rcfile", rc, &new_file)?;
-        }
-    }
-    Ok(())
-}
-
 fn find_exact_line(file: &[u8], line: &[u8]) -> Option<usize> {
     // The trailing newline enforces the end boundary; check the start boundary here.
     assert!(line.ends_with(b"\n"));
@@ -183,11 +166,11 @@ pub(crate) fn remove_legacy_paths(
     // Before the work to support more kinds of shells, which was released in
     // version 1.23.0 of Rustup, we always inserted this line instead, which is
     // now considered legacy
-    remove_legacy_source_command(format!("export PATH=\"{cargo_home}/bin:$PATH\"\n"), rcfiles)?;
+    remove_path_setup_from_rcfiles(&format!("export PATH=\"{cargo_home}/bin:$PATH\""), rcfiles)?;
     // Unfortunately in 1.23, we accidentally used `source` rather than `.`
     // which, while widely supported, isn't actually POSIX, so we also
     // clean that up here.  This issue was filed as #2623.
-    remove_legacy_source_command(format!("source \"{cargo_home}/env\"\n"), rcfiles)?;
+    remove_path_setup_from_rcfiles(&format!("source \"{cargo_home}/env\""), rcfiles)?;
 
     Ok(())
 }
