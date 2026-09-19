@@ -23,7 +23,7 @@
 //! 1) using a shell script that updates PATH if the path is not in PATH
 //! 2) sourcing this script (`. /path/to/script`) in any appropriate rc file
 
-use std::{borrow::Cow, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::bail;
 
@@ -39,7 +39,7 @@ pub(crate) struct ShellScript {
 }
 
 // TODO: Update into a bytestring.
-fn cargo_home_str_with_home(home: &str, process: &Process) -> anyhow::Result<Cow<'static, str>> {
+fn cargo_home_str_with_home(home: &str, process: &Process) -> anyhow::Result<String> {
     let path = process.cargo_home()?;
 
     let default_cargo_home = process
@@ -47,10 +47,10 @@ fn cargo_home_str_with_home(home: &str, process: &Process) -> anyhow::Result<Cow
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".cargo");
     Ok(if default_cargo_home == path {
-        Cow::Owned(format!("{home}/.cargo"))
+        format!("{home}/.cargo")
     } else {
         match path.to_str() {
-            Some(p) => p.to_owned().into(),
+            Some(p) => p.to_owned(),
             None => bail!("Non-Unicode path!"),
         }
     })
@@ -128,7 +128,7 @@ pub(crate) trait UnixShell {
         }
     }
 
-    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<Cow<'static, str>> {
+    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<String> {
         #[cfg(windows)]
         let home = "%USERPROFILE%";
         #[cfg(not(windows))]
@@ -364,7 +364,7 @@ impl UnixShell for Nu {
         ))
     }
 
-    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<Cow<'static, str>> {
+    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<String> {
         cargo_home_str_with_home("~", process)
     }
 }
@@ -556,7 +556,7 @@ impl UnixShell for Xonsh {
         ))
     }
 
-    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<Cow<'static, str>> {
+    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<String> {
         cargo_home_str_with_home("$HOME", process)
     }
 }
