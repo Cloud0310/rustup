@@ -458,12 +458,14 @@ pub(crate) fn wait_for_parent() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn do_add_to_path(process: &Process) -> anyhow::Result<()> {
-    let new_path = _with_path_cargo_home_bin(_add_to_path, process)?;
-    _apply_new_path(new_path, process)
+pub(crate) fn do_add_to_path(cargo_home: &Path, environment: &Key) -> anyhow::Result<()> {
+    let windows_path = get_windows_path_var(environment)?;
+    let cargo_bin = cargo_home.join("bin");
+    let new_path = _with_path(_add_to_path, &cargo_bin, windows_path);
+    _apply_new_path(new_path, environment)
 }
 
-fn _apply_new_path(new_path: Option<HSTRING>, process: &Process) -> anyhow::Result<()> {
+fn _apply_new_path(new_path: Option<HSTRING>, environment: &Key) -> anyhow::Result<()> {
     use std::ptr;
 
     use windows_sys::Win32::{
@@ -476,8 +478,6 @@ fn _apply_new_path(new_path: Option<HSTRING>, process: &Process) -> anyhow::Resu
     let Some(new_path) = new_path else {
         return Ok(()); // No need to set the path
     };
-
-    let environment = process.registry_environment_key()?;
 
     if new_path.is_empty() {
         environment.remove_value("PATH")?;
@@ -505,11 +505,7 @@ fn _apply_new_path(new_path: Option<HSTRING>, process: &Process) -> anyhow::Resu
 // Get the windows PATH variable out of the registry as a String. If
 // this returns None then the PATH variable is not a string and we
 // should not mess with it.
-fn get_windows_path_var(process: &Process) -> anyhow::Result<Option<HSTRING>> {
-    let environment = process
-        .registry_environment_key()
-        .context("Failed opening Environment key")?;
-
+fn get_windows_path_var(environment: &Key) -> anyhow::Result<Option<HSTRING>> {
     let reg_value = environment.get_hstring("PATH");
     match reg_value {
         Ok(val) => Ok(Some(val)),
@@ -562,25 +558,22 @@ fn _remove_from_path(old_path: HSTRING, path_str: HSTRING) -> Option<HSTRING> {
 
 const PATH_SEPARATOR: u16 = b';' as u16;
 
-fn _with_path_cargo_home_bin<F>(f: F, process: &Process) -> anyhow::Result<Option<HSTRING>>
+fn _with_path<F>(f: F, path: &Path, windows_path: Option<HSTRING>) -> Option<HSTRING>
 where
     F: FnOnce(HSTRING, HSTRING) -> Option<HSTRING>,
 {
-    let windows_path = get_windows_path_var(process)?;
-    let mut path_str = process.cargo_home()?;
-    path_str.push("bin");
-    Ok(windows_path.and_then(|old_path| f(old_path, HSTRING::from(path_str.as_path()))))
+    windows_path.and_then(|old_path| f(old_path, HSTRING::from(path)))
 }
 
-pub(crate) fn do_remove_from_path(process: &Process) -> anyhow::Result<()> {
-    let new_path = _with_path_cargo_home_bin(_remove_from_path, process)?;
-    _apply_new_path(new_path, process)
+pub(crate) fn do_remove_from_path(cargo_home: &Path, environment: &Key) -> anyhow::Result<()> {
+    let windows_path = get_windows_path_var(environment)?;
+    let cargo_bin = cargo_home.join("bin");
+    let new_path = _with_path(_remove_from_path, &cargo_bin, windows_path);
+    _apply_new_path(new_path, environment)
 }
-
-const RUSTUP_UNINSTALL_ENTRY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Rustup";
 
 impl Process {
-    fn registry_sub_key_path<'a>(&self, sub_key: &'a str) -> Cow<'a, str> {
+    pub(super) fn registry_sub_key_path<'a>(&self, sub_key: &'a str) -> Cow<'a, str> {
         #[cfg(any(test, feature = "test"))]
         if let Ok(test_id) = self.var(RUSTUP_REGISTRY_TEST_ID) {
             return Cow::Owned(format!(r"RustupTest-{test_id}\{sub_key}"));
@@ -601,12 +594,12 @@ impl Process {
         options.open(self.registry_sub_key_path(sub_key))
     }
 
-    fn registry_environment_key(&self) -> windows_registry::Result<Key> {
+    pub(super) fn registry_environment_key(&self) -> windows_registry::Result<Key> {
         self.registry_key("Environment", CURRENT_USER)
     }
 }
 
-fn rustup_uninstall_registry_key(process: &Process) -> anyhow::Result<Key> {
+pub(super) fn rustup_uninstall_registry_key(process: &Process) -> anyhow::Result<Key> {
     process
         .registry_key(RUSTUP_UNINSTALL_ENTRY, CURRENT_USER)
         .context("Failed creating uninstall key")
@@ -614,17 +607,14 @@ fn rustup_uninstall_registry_key(process: &Process) -> anyhow::Result<Key> {
 
 pub(crate) fn update_uninstall_registry_display_version(
     version: &str,
-    process: &Process,
+    key: &Key,
 ) -> anyhow::Result<()> {
-    rustup_uninstall_registry_key(process)?
-        .set_string("DisplayVersion", version)
+    key.set_string("DisplayVersion", version)
         .context("Failed to set `DisplayVersion`")
 }
 
-pub(crate) fn add_uninstall_registry_entry(process: &Process) -> anyhow::Result<()> {
+pub(crate) fn add_uninstall_registry_entry(cargo_home: &Path, key: &Key) -> anyhow::Result<()> {
     use std::path::PathBuf;
-
-    let key = rustup_uninstall_registry_key(process)?;
 
     // Don't overwrite registry if Rustup is already installed
     let prev = key.get_hstring("UninstallString");
@@ -636,8 +626,7 @@ pub(crate) fn add_uninstall_registry_entry(process: &Process) -> anyhow::Result<
         }
     }
 
-    let mut path = process.cargo_home()?;
-    path.push("bin\\rustup.exe");
+    let path = cargo_home.join("bin\\rustup.exe");
     let mut uninstall_cmd = OsString::from("\"");
     uninstall_cmd.push(path);
     uninstall_cmd.push("\" self uninstall");
@@ -646,13 +635,13 @@ pub(crate) fn add_uninstall_registry_entry(process: &Process) -> anyhow::Result<
         .context("Failed to set `UninstallString`")?;
     key.set_string("DisplayName", "Rustup: the Rust toolchain installer")
         .context("Failed to set `DisplayName`")?;
-    update_uninstall_registry_display_version(env!("CARGO_PKG_VERSION"), process)?;
+    update_uninstall_registry_display_version(env!("CARGO_PKG_VERSION"), key)?;
 
     Ok(())
 }
 
-pub(crate) fn remove_uninstall_registry_entry(process: &Process) -> anyhow::Result<()> {
-    match CURRENT_USER.remove_tree(process.registry_sub_key_path(RUSTUP_UNINSTALL_ENTRY)) {
+pub(crate) fn remove_uninstall_registry_entry(sub_key: &str) -> anyhow::Result<()> {
+    match CURRENT_USER.remove_tree(sub_key) {
         Ok(()) => Ok(()),
         Err(e) if e.code() == WIN32_ERROR(ERROR_FILE_NOT_FOUND).to_hresult() => Ok(()),
         Err(e) => Err(anyhow!(e)),
@@ -669,14 +658,17 @@ pub(crate) fn run_update(setup_path: &Path, process: &Process) -> anyhow::Result
         warn!("failed to get the new rustup version in order to update `DisplayVersion`");
         return Ok(utils::ExitCode(1));
     };
-    update_uninstall_registry_display_version(&version, process)?;
+    update_uninstall_registry_display_version(&version, &rustup_uninstall_registry_key(process)?)?;
 
     Ok(utils::ExitCode(0))
 }
 
 pub(crate) fn self_replace(process: &Process) -> anyhow::Result<utils::ExitCode> {
     wait_for_parent()?;
-    install_bins(process)?;
+    install_bins(
+        &process.cargo_home()?.join("bin"),
+        super::force_hard_links(process),
+    )?;
 
     Ok(utils::ExitCode(0))
 }
@@ -711,7 +703,7 @@ pub(crate) fn self_replace(process: &Process) -> anyhow::Result<utils::ExitCode>
 //
 // .. augmented with this SO answer
 // https://stackoverflow.com/questions/10319526/understanding-a-self-deleting-program-in-c
-pub(crate) fn spawn_uninstall_gc(no_modify_path: bool, process: &Process) -> anyhow::Result<()> {
+pub(crate) fn spawn_uninstall_gc(bin_dir: &Path, no_modify_path: bool) -> anyhow::Result<()> {
     use std::{io, ptr, thread, time::Duration};
 
     use windows_sys::Win32::{
@@ -723,12 +715,13 @@ pub(crate) fn spawn_uninstall_gc(no_modify_path: bool, process: &Process) -> any
         },
     };
 
-    // CARGO_HOME, hopefully empty except for bin/rustup.exe
-    let cargo_home = process.cargo_home()?;
     // The rustup.exe bin
-    let rustup_path = cargo_home.join(format!("bin/rustup{EXE_SUFFIX}"));
+    let rustup_path = bin_dir.join(format!("rustup{EXE_SUFFIX}"));
 
     // The directory containing CARGO_HOME
+    let cargo_home = bin_dir
+        .parent()
+        .expect("cargo bin directory doesn't have a parent?");
     let work_path = cargo_home
         .parent()
         .expect("CARGO_HOME doesn't have a parent?");
@@ -841,6 +834,9 @@ impl RegistryValueId {
     }
 }
 
+pub(super) const RUSTUP_UNINSTALL_ENTRY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Rustup";
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, os::windows::ffi::OsStringExt};
@@ -925,7 +921,8 @@ mod tests {
         let test_id = test_id();
         let tp = test_process(&test_id);
 
-        remove_uninstall_registry_entry(&tp.process).unwrap();
+        remove_uninstall_registry_entry(&tp.process.registry_sub_key_path(RUSTUP_UNINSTALL_ENTRY))
+            .unwrap();
     }
 
     #[test]
@@ -1012,7 +1009,7 @@ mod tests {
             #![allow(clippy::unit_cmp)]
             assert_eq!(
                 (),
-                _apply_new_path(Some(HSTRING::from("foo")), &tp.process).unwrap()
+                _apply_new_path(Some(HSTRING::from("foo")), &environment).unwrap()
             );
         }
         let environment = tp.process.registry_environment_key().unwrap();
@@ -1038,7 +1035,7 @@ mod tests {
             #![allow(clippy::unit_cmp)]
             assert_eq!(
                 (),
-                _apply_new_path(Some(HSTRING::new()), &tp.process).unwrap()
+                _apply_new_path(Some(HSTRING::new()), &environment).unwrap()
             );
         }
         let reg_value = environment.get_value("PATH");
@@ -1059,10 +1056,14 @@ mod tests {
         environment
             .set_bytes("PATH", Type::Bytes, &[0x12, 0x34])
             .unwrap();
-        // Ok(None) signals no change to the PATH setting layer
+        // None signals no change to the PATH setting layer
         assert_eq!(
             None,
-            _with_path_cargo_home_bin(|_, _| panic!("called"), &tp.process).unwrap()
+            _with_path(
+                |_, _| panic!("called"),
+                Path::new("ignored"),
+                get_windows_path_var(&environment).unwrap(),
+            )
         );
 
         assert_eq!(
@@ -1082,7 +1083,7 @@ mod tests {
 
         assert_eq!(
             Some(HSTRING::new()),
-            get_windows_path_var(&tp.process).unwrap()
+            get_windows_path_var(&environment).unwrap()
         );
     }
 

@@ -8,7 +8,7 @@ use tracing::{error, warn};
 
 use super::{
     install_bins,
-    shell::{self, Posix, UnixShell},
+    shell::{Posix, Shell, UnixShell},
 };
 use crate::{process::Process, utils};
 
@@ -53,72 +53,66 @@ pub(crate) fn do_anti_sudo_check(
     Ok(utils::ExitCode(0))
 }
 
-/// Removes PATH setup commands from existing shell rcfiles.
-pub(crate) fn remove_path_setup_from_rcfiles(process: &Process) -> anyhow::Result<()> {
-    for sh in shell::get_available_shells(process) {
-        let command_bytes = format!("{}\n", sh.source_string(process)?).into_bytes();
-
-        // Check more files for cleanup than normally are updated.
-        for rc in sh
-            .rcfile_candidates(process)
-            .iter()
-            .filter(|rc| rc.is_file())
-        {
-            let file = utils::read_file("rcfile", rc)?;
-            let file_bytes = file.into_bytes();
-            // FIXME: This is whitespace sensitive where it should not be.
-            if let Some(idx) = find_exact_line(&file_bytes, &command_bytes) {
-                // Here we rewrite the file without the offending line.
-                let mut new_bytes = file_bytes[..idx].to_vec();
-                new_bytes.extend(&file_bytes[idx + command_bytes.len()..]);
-                let new_file = String::from_utf8(new_bytes).unwrap();
-                utils::write_file("rcfile", rc, &new_file)?;
-            }
+/// Removes the first exact line matching `command` followed by a newline from each existing rcfile.
+pub(crate) fn remove_path_setup_from_rcfiles(
+    command: &str,
+    rcfiles: &[PathBuf],
+) -> anyhow::Result<()> {
+    let command_bytes = format!("{command}\n").into_bytes();
+    for rc in rcfiles.iter().filter(|rc| rc.is_file()) {
+        let file = utils::read_file("rcfile", rc)?;
+        let file_bytes = file.into_bytes();
+        // FIXME: This is whitespace sensitive where it should not be.
+        if let Some(idx) = find_exact_line(&file_bytes, &command_bytes) {
+            // Here we rewrite the file without the offending line.
+            let mut new_bytes = file_bytes[..idx].to_vec();
+            new_bytes.extend(&file_bytes[idx + command_bytes.len()..]);
+            let new_file = String::from_utf8(new_bytes).unwrap();
+            utils::write_file("rcfile", rc, &new_file)?;
         }
     }
+    Ok(())
+}
 
-    remove_legacy_paths(process)?;
+pub(crate) fn add_path_setup_to_rcfiles(
+    source_cmd: &str,
+    rcfiles: &[PathBuf],
+) -> anyhow::Result<()> {
+    let source_cmd_with_newline = format!("\n{source_cmd}");
+
+    for rc in rcfiles {
+        let cmd_to_write = match utils::read_file("rcfile", rc) {
+            Ok(contents) if contents.contains(source_cmd) => continue,
+            Ok(contents) if !contents.ends_with('\n') => &source_cmd_with_newline,
+            _ => source_cmd,
+        };
+
+        let rc_dir = rc.parent().with_context(|| {
+            format!(
+                "parent directory doesn't exist for rcfile path: `{}`",
+                rc.display()
+            )
+        })?;
+        utils::ensure_dir_exists("rcfile dir", rc_dir)?;
+        utils::append_file("rcfile", rc, cmd_to_write)
+            .with_context(|| format!("could not amend shell profile: '{}'", rc.display()))?;
+    }
 
     Ok(())
 }
 
-pub(crate) fn add_path_setup_to_rcfiles(process: &Process) -> anyhow::Result<()> {
-    for sh in shell::get_available_shells(process) {
-        let source_cmd = sh.source_string(process)?;
-        let source_cmd_with_newline = format!("\n{source_cmd}");
-
-        for rc in sh.rcfiles_for_install(process) {
-            let cmd_to_write = match utils::read_file("rcfile", &rc) {
-                Ok(contents) if contents.contains(&source_cmd) => continue,
-                Ok(contents) if !contents.ends_with('\n') => &source_cmd_with_newline,
-                _ => &source_cmd,
-            };
-
-            let rc_dir = rc.parent().with_context(|| {
-                format!(
-                    "parent directory doesn't exist for rcfile path: `{}`",
-                    rc.display()
-                )
-            })?;
-            utils::ensure_dir_exists("rcfile dir", rc_dir)?;
-            utils::append_file("rcfile", &rc, cmd_to_write)
-                .with_context(|| format!("could not amend shell profile: '{}'", rc.display()))?;
-        }
-    }
-
-    remove_legacy_paths(process)?;
-
-    Ok(())
-}
-
-pub(crate) fn do_write_env_files(process: &Process) -> anyhow::Result<()> {
+pub(crate) fn do_write_env_files(
+    cargo_home: &Path,
+    home_dir: Option<&Path>,
+    shells: impl Iterator<Item = Shell>,
+) -> anyhow::Result<()> {
     let mut written = vec![];
 
-    for sh in shell::get_available_shells(process) {
+    for sh in shells {
         let script = sh.env_script();
         // Only write each possible script once.
         if !written.contains(&script) {
-            sh.write_script(&script, process)?;
+            sh.write_script(&script, cargo_home, home_dir)?;
             written.push(script);
         }
     }
@@ -145,15 +139,18 @@ pub(crate) fn run_update(setup_path: &Path, _process: &Process) -> anyhow::Resul
 /// `$CARGO_HOME/bin/rustup` with the running exe, and updates the
 /// links to it.
 pub(crate) fn self_replace(process: &Process) -> anyhow::Result<utils::ExitCode> {
-    install_bins(process)?;
+    install_bins(
+        &process.cargo_home()?.join("bin"),
+        super::force_hard_links(process),
+    )?;
 
     Ok(utils::ExitCode(0))
 }
 
-fn remove_legacy_source_command(source_cmd: String, process: &Process) -> anyhow::Result<()> {
+fn remove_legacy_source_command(source_cmd: String, rcfiles: &[PathBuf]) -> anyhow::Result<()> {
     let cmd_bytes = source_cmd.into_bytes();
-    for rc in shell::legacy_paths(process).filter(|rc| rc.is_file()) {
-        let file = utils::read_file("rcfile", &rc)?;
+    for rc in rcfiles.iter().filter(|rc| rc.is_file()) {
+        let file = utils::read_file("rcfile", rc)?;
         let file_bytes = file.into_bytes();
         // FIXME: This is whitespace sensitive where it should not be.
         if let Some(idx) = find_exact_line(&file_bytes, &cmd_bytes) {
@@ -161,7 +158,7 @@ fn remove_legacy_source_command(source_cmd: String, process: &Process) -> anyhow
             let mut new_bytes = file_bytes[..idx].to_vec();
             new_bytes.extend(&file_bytes[idx + cmd_bytes.len()..]);
             let new_file = String::from_utf8(new_bytes).unwrap();
-            utils::write_file("rcfile", &rc, &new_file)?;
+            utils::write_file("rcfile", rc, &new_file)?;
         }
     }
     Ok(())
@@ -177,23 +174,30 @@ fn find_exact_line(file: &[u8], line: &[u8]) -> Option<usize> {
         })
 }
 
-fn remove_legacy_paths(process: &Process) -> anyhow::Result<()> {
+pub(crate) fn remove_legacy_paths(
+    cargo_home: &Path,
+    home_dir: Option<&Path>,
+    rcfiles: &[PathBuf],
+) -> anyhow::Result<()> {
     // Before the work to support more kinds of shells, which was released in
     // version 1.23.0 of Rustup, we always inserted this line instead, which is
     // now considered legacy
     remove_legacy_source_command(
         format!(
             "export PATH=\"{}/bin:$PATH\"\n",
-            Posix.cargo_home_str(process)?
+            Posix.cargo_home_str(cargo_home, home_dir)?
         ),
-        process,
+        rcfiles,
     )?;
     // Unfortunately in 1.23, we accidentally used `source` rather than `.`
     // which, while widely supported, isn't actually POSIX, so we also
     // clean that up here.  This issue was filed as #2623.
     remove_legacy_source_command(
-        format!("source \"{}/env\"\n", Posix.cargo_home_str(process)?),
-        process,
+        format!(
+            "source \"{}/env\"\n",
+            Posix.cargo_home_str(cargo_home, home_dir)?
+        ),
+        rcfiles,
     )?;
 
     Ok(())

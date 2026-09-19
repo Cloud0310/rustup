@@ -192,31 +192,36 @@ impl InstallOpts<'_> {
             return Ok(ExitCode::FAILURE);
         }
 
-        let cargo_home = display_cargo_home(process)?;
+        let cargo_home = process.cargo_home()?;
+        let cargo_home_display = display_cargo_home(&cargo_home, process.home_dir().as_deref());
         #[cfg(windows)]
-        let cargo_home = cargo_home.replace('\\', r"\\");
+        let cargo_home_display = cargo_home_display.replace('\\', r"\\");
         #[cfg(windows)]
         let msg = if no_modify_path {
             format!(
                 post_install_msg_win_no_modify_path!(),
-                cargo_home = cargo_home
+                cargo_home = cargo_home_display
             )
         } else {
-            format!(post_install_msg_win!(), cargo_home = cargo_home)
+            format!(post_install_msg_win!(), cargo_home = cargo_home_display)
         };
         #[cfg(not(windows))]
-        let source_env_lines = shell::build_source_env_lines(process);
+        let source_env_lines = shell::build_source_env_lines(
+            &cargo_home,
+            process.home_dir().as_deref(),
+            shell::get_available_shells(process),
+        );
         #[cfg(not(windows))]
         let msg = if no_modify_path {
             format!(
                 post_install_msg_unix_no_modify_path!(),
-                cargo_home = cargo_home,
+                cargo_home = cargo_home_display,
                 source_env_lines = source_env_lines,
             )
         } else {
             format!(
                 post_install_msg_unix!(),
-                cargo_home = cargo_home,
+                cargo_home = cargo_home_display,
                 source_env_lines = source_env_lines,
             )
         };
@@ -243,20 +248,47 @@ impl InstallOpts<'_> {
         quiet: bool,
         process: &Process,
     ) -> anyhow::Result<()> {
-        install_bins(process)?;
+        let cargo_home = process.cargo_home()?;
+        let cargo_bin = cargo_home.join("bin");
+        install_bins(&cargo_bin, force_hard_links(process))?;
 
         #[cfg(unix)]
-        unix::do_write_env_files(process)?;
-
-        if !self.no_modify_path {
-            #[cfg(unix)]
-            add_path_setup_to_rcfiles(process)?;
-            #[cfg(windows)]
-            do_add_to_path(process)?;
+        {
+            let home_dir = process.home_dir();
+            unix::do_write_env_files(
+                &cargo_home,
+                home_dir.as_deref(),
+                shell::get_available_shells(process),
+            )?;
+            if !self.no_modify_path {
+                for sh in shell::get_available_shells(process) {
+                    let source_cmd = sh.source_string(&cargo_home, home_dir.as_deref())?;
+                    add_path_setup_to_rcfiles(
+                        &source_cmd,
+                        &sh.rcfiles_for_install(home_dir.as_deref(), process),
+                    )?;
+                }
+                unix::remove_legacy_paths(
+                    &cargo_home,
+                    home_dir.as_deref(),
+                    &shell::legacy_paths(process).collect::<Vec<_>>(),
+                )?;
+            }
         }
 
         #[cfg(windows)]
-        add_uninstall_registry_entry(process)?;
+        {
+            if !self.no_modify_path {
+                let environment = process
+                    .registry_environment_key()
+                    .context("Failed opening Environment key")?;
+                do_add_to_path(&cargo_home, &environment)?;
+            }
+            add_uninstall_registry_entry(
+                &cargo_home,
+                &windows::rustup_uninstall_registry_key(process)?,
+            )?;
+        }
 
         // If RUSTUP_HOME is not set, make sure it exists
         if process.var_os("RUSTUP_HOME").is_none() {
@@ -291,7 +323,7 @@ impl InstallOpts<'_> {
                 DistributableToolchain::install(options).await?.status
             };
 
-            check_proxy_sanity(cfg.process, components, &desc)?;
+            check_proxy_sanity(&cargo_bin, components, &desc)?;
 
             cfg.set_default(Some(&partial_desc.into()))?;
             writeln!(cfg.process.stdout().lock())?;
@@ -597,21 +629,16 @@ fn update_root(process: &Process) -> String {
 
 /// `CARGO_HOME` suitable for display, possibly with $HOME
 /// substituted for the directory prefix
-fn display_cargo_home(process: &Process) -> anyhow::Result<Cow<'static, str>> {
-    let path = process.cargo_home()?;
-
-    let default_cargo_home = process
-        .home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".cargo");
-    Ok(if default_cargo_home == path {
+fn display_cargo_home(cargo_home: &Path, home_dir: Option<&Path>) -> Cow<'static, str> {
+    let default_cargo_home = home_dir.unwrap_or_else(|| Path::new(".")).join(".cargo");
+    if default_cargo_home == cargo_home {
         cfg_select! {
             windows => r"%USERPROFILE%\.cargo".into(),
             _ => "$HOME/.cargo".into(),
         }
     } else {
-        path.to_string_lossy().into_owned().into()
-    })
+        cargo_home.to_string_lossy().into_owned().into()
+    }
 }
 
 fn rustc_or_cargo_exists_in_path(process: &Process) -> anyhow::Result<()> {
@@ -694,11 +721,15 @@ fn pre_install_msg(no_modify_path: bool, process: &Process) -> anyhow::Result<St
     let rustup_home = home::rustup_home()?;
 
     if !no_modify_path {
-        // Brittle code warning: some duplication in unix::add_path_setup_to_rcfiles
+        // Brittle code warning: some duplication in InstallOpts::install_rust
         #[cfg(not(windows))]
         {
+            let home_dir = process.home_dir();
             let rcfiles = shell::get_available_shells(process)
-                .flat_map(|sh| sh.rcfiles_for_install(process).into_iter())
+                .flat_map(|sh| {
+                    sh.rcfiles_for_install(home_dir.as_deref(), process)
+                        .into_iter()
+                })
                 .map(|rc| format!("    {}", rc.display()))
                 .collect::<Vec<_>>();
             let plural = if rcfiles.len() > 1 { "s" } else { "" };
@@ -775,12 +806,11 @@ fn warn_if_default_linker_missing(process: &Process) {
     }
 }
 
-fn install_bins(process: &Process) -> anyhow::Result<()> {
-    let bin_path = process.cargo_home()?.join("bin");
+fn install_bins(bin_path: &Path, force_hard_links: bool) -> anyhow::Result<()> {
     let this_exe_path = utils::current_exe()?;
     let rustup_path = bin_path.join(format!("rustup{EXE_SUFFIX}"));
 
-    utils::ensure_dir_exists("bin", &bin_path)?;
+    utils::ensure_dir_exists("bin", bin_path)?;
     // NB: Even on Linux we can't just copy the new binary over the (running)
     // old binary; we must unlink it first.
     if rustup_path.exists() {
@@ -788,22 +818,22 @@ fn install_bins(process: &Process) -> anyhow::Result<()> {
     }
     utils::copy_file_symlink_to_source(&this_exe_path, &rustup_path)?;
     utils::make_executable(&rustup_path)?;
-    install_proxies(process)
+    install_proxies_with_opts(bin_path, force_hard_links)
 }
 
 pub(crate) fn install_proxies(process: &Process) -> anyhow::Result<()> {
-    install_proxies_with_opts(
-        process,
-        // HACK: On Windows CI machines, some Docker setups don't like symlinks, so we force hard
-        // links in this case.
-        // See: <https://github.com/rust-lang/rustup/issues/4291>
-        (cfg!(windows) && process.is_ci())
-            || process.var_os("RUSTUP_FORCE_HARDLINK_PROXIES").is_some(),
-    )
+    let bin_path = process.cargo_home()?.join("bin");
+    install_proxies_with_opts(&bin_path, force_hard_links(process))
 }
 
-fn install_proxies_with_opts(process: &Process, force_hard_links: bool) -> anyhow::Result<()> {
-    let bin_path = process.cargo_home()?.join("bin");
+fn force_hard_links(process: &Process) -> bool {
+    // HACK: On Windows CI machines, some Docker setups don't like symlinks, so we force hard
+    // links in this case.
+    // See: <https://github.com/rust-lang/rustup/issues/4291>
+    (cfg!(windows) && process.is_ci()) || process.var_os("RUSTUP_FORCE_HARDLINK_PROXIES").is_some()
+}
+
+fn install_proxies_with_opts(bin_path: &Path, force_hard_links: bool) -> anyhow::Result<()> {
     let rustup_path = bin_path.join(format!("rustup{EXE_SUFFIX}"));
 
     let rustup = Handle::from_path(&rustup_path)?;
@@ -897,7 +927,7 @@ fn install_proxies_with_opts(process: &Process, force_hard_links: bool) -> anyho
         // This may fail for symlinks in some circumstances.
         let path = bin_path.join(format!("{tool}{EXE_SUFFIX}", tool = TOOLS[0]));
         if fs::File::open(path).is_err() {
-            return install_proxies_with_opts(process, true);
+            return install_proxies_with_opts(bin_path, true);
         }
     }
 
@@ -905,12 +935,10 @@ fn install_proxies_with_opts(process: &Process, force_hard_links: bool) -> anyho
 }
 
 fn check_proxy_sanity(
-    process: &Process,
+    bin_path: &Path,
     components: &[&str],
     desc: &ToolchainDesc,
 ) -> anyhow::Result<()> {
-    let bin_path = process.cargo_home()?.join("bin");
-
     // Sometimes linking a proxy produces an unpredictable result, where the proxy
     // is in place, but manages to not call rustup correctly. One way to make sure we
     // don't run headfirst into the wall is to at least try and run our freshly
@@ -964,7 +992,7 @@ pub(crate) fn uninstall(
         } else {
             format!(
                 pre_uninstall_msg!(),
-                cargo_home = display_cargo_home(process)?
+                cargo_home = display_cargo_home(&cargo_home, process.home_dir().as_deref())
             )
         };
         md(&mut process.stdout(), msg);
@@ -995,7 +1023,7 @@ pub(crate) fn uninstall(
     // the process exits.
     // see: windows::{complete_windows_uninstall,spawn_uninstall_gc}
     #[cfg(windows)]
-    windows::spawn_uninstall_gc(no_modify_path, process)?;
+    windows::spawn_uninstall_gc(&cargo_home.join("bin"), no_modify_path)?;
 
     info!("rustup is uninstalled");
 
@@ -1052,7 +1080,9 @@ fn clean_cargo_home(
     utils::remove_file("rustup_bin", &rustup_path)?;
 
     #[cfg(windows)]
-    remove_uninstall_registry_entry(process)?;
+    remove_uninstall_registry_entry(
+        &process.registry_sub_key_path(windows::RUSTUP_UNINSTALL_ENTRY),
+    )?;
 
     let cargo_bin_display = cargo_bin.display();
     info!("removing empty cargo bin directory `{cargo_bin_display}`");
@@ -1069,9 +1099,29 @@ fn clean_cargo_home(
         Ok(()) if !no_modify_path => {
             info!("removing cargo bin directory `{cargo_bin_display}` from $PATH");
             #[cfg(unix)]
-            remove_path_setup_from_rcfiles(process)?;
+            {
+                let home_dir = process.home_dir();
+                for sh in shell::get_available_shells(process) {
+                    let source_cmd = sh.source_string(cargo_home, home_dir.as_deref())?;
+                    // Check more files for cleanup than normally are updated.
+                    remove_path_setup_from_rcfiles(
+                        &source_cmd,
+                        &sh.rcfile_candidates(home_dir.as_deref(), process),
+                    )?;
+                }
+                unix::remove_legacy_paths(
+                    cargo_home,
+                    home_dir.as_deref(),
+                    &shell::legacy_paths(process).collect::<Vec<_>>(),
+                )?;
+            }
             #[cfg(windows)]
-            do_remove_from_path(process)?;
+            {
+                let environment = process
+                    .registry_environment_key()
+                    .context("Failed opening Environment key")?;
+                do_remove_from_path(cargo_home, &environment)?;
+            }
         }
         Ok(()) => {}
     }
@@ -1379,8 +1429,7 @@ pub(crate) async fn check_rustup_update(dl_cfg: &DownloadCfg<'_>) -> anyhow::Res
 }
 
 #[tracing::instrument(level = "trace")]
-pub(crate) fn cleanup_self_updater(process: &Process) -> anyhow::Result<()> {
-    let cargo_home = process.cargo_home()?;
+pub(crate) fn cleanup_self_updater(cargo_home: &Path) -> anyhow::Result<()> {
     let setup = cargo_home.join(format!("bin/rustup-init{EXE_SUFFIX}"));
 
     if setup.exists() {
@@ -1400,7 +1449,7 @@ mod tests {
         dist::{PartialToolchainDesc, Profile},
         for_host,
         process::TestProcess,
-        test::{Env, test_dir, with_rustup_home},
+        test::{test_dir, with_rustup_home},
     };
 
     #[test]
@@ -1445,10 +1494,7 @@ info: default host tuple is {0}
     fn install_bins_creates_cargo_home() {
         let root_dir = test_dir().unwrap();
         let cargo_home = root_dir.path().join("cargo");
-        let mut vars = HashMap::new();
-        vars.env("CARGO_HOME", cargo_home.to_string_lossy().to_string());
-        let tp = TestProcess::with_vars(vars);
-        super::install_bins(&tp.process).unwrap();
+        super::install_bins(&cargo_home.join("bin"), false).unwrap();
         assert!(cargo_home.exists());
     }
 }

@@ -23,7 +23,7 @@
 //! 1) using a shell script that updates PATH if the path is not in PATH
 //! 2) sourcing this script (`. /path/to/script`) in any appropriate rc file
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::bail;
 
@@ -39,17 +39,16 @@ pub(crate) struct ShellScript {
 }
 
 // TODO: Update into a bytestring.
-fn cargo_home_str_with_home(home: &str, process: &Process) -> anyhow::Result<String> {
-    let path = process.cargo_home()?;
-
-    let default_cargo_home = process
-        .home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".cargo");
-    Ok(if default_cargo_home == path {
+fn cargo_home_str_with_home(
+    home: &str,
+    cargo_home: &Path,
+    home_dir: Option<&Path>,
+) -> anyhow::Result<String> {
+    let default_cargo_home = home_dir.unwrap_or_else(|| Path::new(".")).join(".cargo");
+    Ok(if default_cargo_home == cargo_home {
         format!("{home}/.cargo")
     } else {
-        match path.to_str() {
+        match cargo_home.to_str() {
             Some(p) => p.to_owned(),
             None => bail!("Non-Unicode path!"),
         }
@@ -75,10 +74,14 @@ fn enumerate_shells() -> Vec<Shell> {
 /// Builds the shell source lines for the post-install message, showing only
 /// shells that are available on the current system. Shells sharing the same
 /// env file are grouped onto one line (e.g. sh/bash/zsh all use `env`).
-pub(crate) fn build_source_env_lines(process: &Process) -> String {
+pub(crate) fn build_source_env_lines(
+    cargo_home: &Path,
+    home_dir: Option<&Path>,
+    shells: impl Iterator<Item = Shell>,
+) -> String {
     let mut groups = Vec::<(_, Vec<_>)>::new();
-    for shell in get_available_shells(process) {
-        let Ok(src) = shell.source_string(process) else {
+    for shell in shells {
+        let Ok(src) = shell.source_string(cargo_home, home_dir) else {
             continue;
         };
         if let Some(names) = groups
@@ -113,12 +116,12 @@ pub(crate) trait UnixShell {
 
     // Gives all rcfiles of a given shell that Rustup is concerned with.
     // Used primarily in checking rcfiles for cleanup.
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf>;
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf>;
 
     // Returns rcfile paths where installation should add the source command.
     // May return multiple paths, including files that do not yet exist.
     // Does not modify the files.
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf>;
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf>;
 
     // Writes the relevant env file.
     fn env_script(&self) -> ShellScript {
@@ -128,22 +131,29 @@ pub(crate) trait UnixShell {
         }
     }
 
-    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<String> {
+    fn cargo_home_str(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
         #[cfg(windows)]
         let home = "%USERPROFILE%";
         #[cfg(not(windows))]
         let home = "$HOME";
-        cargo_home_str_with_home(home, process)
+        cargo_home_str_with_home(home, cargo_home, home_dir)
     }
 
-    fn source_string(&self, process: &Process) -> anyhow::Result<String> {
-        Ok(format!(r#". "{}/env""#, self.cargo_home_str(process)?))
+    fn source_string(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
+        Ok(format!(
+            r#". "{}/env""#,
+            self.cargo_home_str(cargo_home, home_dir)?
+        ))
     }
 
-    fn write_script(&self, script: &ShellScript, process: &Process) -> anyhow::Result<()> {
-        let home = process.cargo_home()?;
-        let cargo_bin = format!("{}/bin", self.cargo_home_str(process)?);
-        let env_name = home.join(script.name);
+    fn write_script(
+        &self,
+        script: &ShellScript,
+        cargo_home: &Path,
+        home_dir: Option<&Path>,
+    ) -> anyhow::Result<()> {
+        let cargo_bin = format!("{}/bin", self.cargo_home_str(cargo_home, home_dir)?);
+        let env_name = cargo_home.join(script.name);
         let env_file = script.content.replace("{cargo_bin}", &cargo_bin);
         utils::write_file(script.name, &env_name, &env_file)?;
         Ok(())
@@ -161,17 +171,17 @@ impl UnixShell for Posix {
         "sh/ash/dash/pdksh"
     }
 
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf> {
-        match process.home_dir() {
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, _: &Process) -> Vec<PathBuf> {
+        match home_dir {
             Some(dir) => vec![dir.join(".profile")],
             _ => vec![],
         }
     }
 
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
         // Write to .profile even if it doesn't exist. It's the only rc in the
         // POSIX spec so it should always be set up.
-        self.rcfile_candidates(process)
+        self.rcfile_candidates(home_dir, process)
     }
 }
 
@@ -179,24 +189,26 @@ struct Bash;
 
 impl UnixShell for Bash {
     fn does_exist(&self, process: &Process) -> bool {
-        !self.rcfiles_for_install(process).is_empty()
+        !self
+            .rcfiles_for_install(process.home_dir().as_deref(), process)
+            .is_empty()
     }
 
     fn name(&self) -> &'static str {
         "bash"
     }
 
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, _: &Process) -> Vec<PathBuf> {
         // Bash also may read .profile, however Rustup already includes handling
         // .profile as part of POSIX and always does setup for POSIX shells.
         [".bash_profile", ".bash_login", ".bashrc"]
             .iter()
-            .filter_map(|rc| process.home_dir().map(|dir| dir.join(rc)))
+            .filter_map(|rc| home_dir.map(|dir| dir.join(rc)))
             .collect()
     }
 
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf> {
-        self.rcfile_candidates(process)
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
+        self.rcfile_candidates(home_dir, process)
             .into_iter()
             .filter(|rc| rc.is_file())
             .collect()
@@ -237,24 +249,24 @@ impl UnixShell for Zsh {
         "zsh"
     }
 
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf> {
-        [Self::zdotdir(process).ok(), process.home_dir()]
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
+        [Self::zdotdir(process).ok().as_deref(), home_dir]
             .iter()
             .filter_map(|dir| dir.as_ref().map(|p| p.join(".zshenv")))
             .collect()
     }
 
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
         // zsh can change $ZDOTDIR both _before_ AND _during_ reading .zshenv,
         // so we: write to $ZDOTDIR/.zshenv if-exists ($ZDOTDIR changes before)
         // OR write to $HOME/.zshenv if it exists (change-during)
         // if neither exist, we create it ourselves, but using the same logic,
         // because we must still respond to whether $ZDOTDIR is set or unset.
         // In any case we only write once.
-        self.rcfile_candidates(process)
+        self.rcfile_candidates(home_dir, process)
             .into_iter()
             .filter(|env| env.is_file())
-            .chain(self.rcfile_candidates(process))
+            .chain(self.rcfile_candidates(home_dir, process))
             .take(1)
             .collect()
     }
@@ -275,24 +287,21 @@ impl UnixShell for Fish {
 
     // > "$XDG_CONFIG_HOME/fish/conf.d" (or "~/.config/fish/conf.d" if that variable is unset) for the user
     // from <https://github.com/fish-shell/fish-shell/issues/3170#issuecomment-228311857>
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
         let p0 = process.var("XDG_CONFIG_HOME").ok().map(|p| {
             let mut path = PathBuf::from(p);
             path.push("fish/conf.d/rustup.fish");
             path
         });
 
-        let p1 = process.home_dir().map(|mut path| {
-            path.push(".config/fish/conf.d/rustup.fish");
-            path
-        });
+        let p1 = home_dir.map(|home| home.join(".config/fish/conf.d/rustup.fish"));
 
         p0.into_iter().chain(p1).collect()
     }
 
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
         // The first rcfile takes precedence.
-        match self.rcfile_candidates(process).into_iter().next() {
+        match self.rcfile_candidates(home_dir, process).into_iter().next() {
             Some(path) => vec![path],
             None => vec![],
         }
@@ -305,10 +314,10 @@ impl UnixShell for Fish {
         }
     }
 
-    fn source_string(&self, process: &Process) -> anyhow::Result<String> {
+    fn source_string(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
         Ok(format!(
             r#"source "{}/env.fish""#,
-            self.cargo_home_str(process)?
+            self.cargo_home_str(cargo_home, home_dir)?
         ))
     }
 }
@@ -326,7 +335,7 @@ impl UnixShell for Nu {
         "nushell"
     }
 
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
         let mut paths = vec![];
 
         if let Ok(p) = process.var("XDG_CONFIG_HOME") {
@@ -335,16 +344,15 @@ impl UnixShell for Nu {
             paths.push(p)
         }
 
-        if let Some(mut p) = process.home_dir() {
-            p.extend([".config", "nushell", "config.nu"]);
-            paths.push(p)
+        if let Some(home) = home_dir {
+            paths.push(home.join(".config/nushell/config.nu"))
         }
         paths
     }
 
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
         // The first rcfile in XDG_CONFIG_HOME takes precedence.
-        match self.rcfile_candidates(process).into_iter().next() {
+        match self.rcfile_candidates(home_dir, process).into_iter().next() {
             Some(path) => vec![path],
             None => vec![],
         }
@@ -357,15 +365,15 @@ impl UnixShell for Nu {
         }
     }
 
-    fn source_string(&self, process: &Process) -> anyhow::Result<String> {
+    fn source_string(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
         Ok(format!(
             r#"source "{}/env.nu""#,
-            self.cargo_home_str(process)?
+            self.cargo_home_str(cargo_home, home_dir)?
         ))
     }
 
-    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<String> {
-        cargo_home_str_with_home("~", process)
+    fn cargo_home_str(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
+        cargo_home_str_with_home("~", cargo_home, home_dir)
     }
 }
 
@@ -381,10 +389,10 @@ impl UnixShell for Tcsh {
         "tcsh"
     }
 
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, _: &Process) -> Vec<PathBuf> {
         let mut paths = vec![];
 
-        if let Some(home) = process.home_dir() {
+        if let Some(home) = home_dir {
             paths.push(home.join(".tcshrc"));
             paths.push(home.join(".cshrc"));
         }
@@ -392,15 +400,15 @@ impl UnixShell for Tcsh {
         paths
     }
 
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf> {
-        for f in self.rcfile_candidates(process) {
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
+        for f in self.rcfile_candidates(home_dir, process) {
             if f.is_file() {
                 return vec![f];
             }
         }
 
         // If neither exists, default to ~/.tcshrc
-        if let Some(home) = process.home_dir() {
+        if let Some(home) = home_dir {
             return vec![home.join(".tcshrc")];
         }
 
@@ -414,10 +422,10 @@ impl UnixShell for Tcsh {
         }
     }
 
-    fn source_string(&self, process: &Process) -> anyhow::Result<String> {
+    fn source_string(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
         Ok(format!(
             r#"source "{}/env.tcsh""#,
-            self.cargo_home_str(process)?
+            self.cargo_home_str(cargo_home, home_dir)?
         ))
     }
 }
@@ -434,13 +442,13 @@ impl UnixShell for Pwsh {
         "pwsh"
     }
 
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, _: &Process) -> Vec<PathBuf> {
         let mut paths = vec![];
 
-        let Some(mut config_dir) = process.home_dir() else {
+        let Some(home) = home_dir else {
             return paths;
         };
-        config_dir.extend([".config", "powershell"]);
+        let config_dir = home.join(".config/powershell");
 
         // PowerShell provides many kinds of user-specific and host-specific
         // profile files. When the system has multiple profiles, PowerShell
@@ -478,14 +486,14 @@ impl UnixShell for Pwsh {
         paths
     }
 
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, _: &Process) -> Vec<PathBuf> {
         let mut paths = vec![];
         // Always modify the "Current User, All Hosts" profile.
-        let Some(mut profile) = process.home_dir() else {
+        let Some(home) = home_dir else {
             return paths;
         };
 
-        profile.extend([".config", "powershell", "profile.ps1"]);
+        let profile = home.join(".config/powershell/profile.ps1");
         paths.push(profile);
         paths
     }
@@ -497,8 +505,11 @@ impl UnixShell for Pwsh {
         }
     }
 
-    fn source_string(&self, process: &Process) -> anyhow::Result<String> {
-        Ok(format!(r#". "{}/env.ps1""#, self.cargo_home_str(process)?))
+    fn source_string(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
+        Ok(format!(
+            r#". "{}/env.ps1""#,
+            self.cargo_home_str(cargo_home, home_dir)?
+        ))
     }
 }
 
@@ -513,7 +524,7 @@ impl UnixShell for Xonsh {
         "xonsh"
     }
 
-    fn rcfile_candidates(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfile_candidates(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
         let mut paths = vec![];
 
         if let Ok(p) = process.var("XDG_CONFIG_HOME") {
@@ -522,21 +533,20 @@ impl UnixShell for Xonsh {
             paths.push(p);
         }
 
-        if let Some(mut p) = process.home_dir() {
-            p.extend([".config", "xonsh", "rc.xsh"]);
-            paths.push(p);
+        if let Some(home) = home_dir {
+            paths.push(home.join(".config/xonsh/rc.xsh"));
         }
 
-        if let Some(home) = process.home_dir() {
+        if let Some(home) = home_dir {
             paths.push(home.join(".xonshrc"));
         }
 
         paths
     }
 
-    fn rcfiles_for_install(&self, process: &Process) -> Vec<PathBuf> {
+    fn rcfiles_for_install(&self, home_dir: Option<&Path>, process: &Process) -> Vec<PathBuf> {
         // The first rcfile in XDG_CONFIG_HOME takes precedence.
-        match self.rcfile_candidates(process).into_iter().next() {
+        match self.rcfile_candidates(home_dir, process).into_iter().next() {
             Some(path) => vec![path],
             None => vec![],
         }
@@ -549,15 +559,15 @@ impl UnixShell for Xonsh {
         }
     }
 
-    fn source_string(&self, process: &Process) -> anyhow::Result<String> {
+    fn source_string(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
         Ok(format!(
             r#"source "{}/env.xsh""#,
-            self.cargo_home_str(process)?
+            self.cargo_home_str(cargo_home, home_dir)?
         ))
     }
 
-    fn cargo_home_str(&self, process: &Process) -> anyhow::Result<String> {
-        cargo_home_str_with_home("$HOME", process)
+    fn cargo_home_str(&self, cargo_home: &Path, home_dir: Option<&Path>) -> anyhow::Result<String> {
+        cargo_home_str_with_home("$HOME", cargo_home, home_dir)
     }
 }
 
