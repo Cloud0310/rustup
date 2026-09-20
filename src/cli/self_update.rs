@@ -192,7 +192,7 @@ impl InstallOpts<'_> {
             return Ok(ExitCode::FAILURE);
         }
 
-        let cargo_home = canonical_cargo_home(process)?;
+        let cargo_home = display_cargo_home(process)?;
         #[cfg(windows)]
         let cargo_home = cargo_home.replace('\\', r"\\");
         #[cfg(windows)]
@@ -597,7 +597,7 @@ fn update_root(process: &Process) -> String {
 
 /// `CARGO_HOME` suitable for display, possibly with $HOME
 /// substituted for the directory prefix
-fn canonical_cargo_home(process: &Process) -> anyhow::Result<Cow<'static, str>> {
+fn display_cargo_home(process: &Process) -> anyhow::Result<Cow<'static, str>> {
     let path = process.cargo_home()?;
 
     let default_cargo_home = process
@@ -964,7 +964,7 @@ pub(crate) fn uninstall(
         } else {
             format!(
                 pre_uninstall_msg!(),
-                cargo_home = canonical_cargo_home(process)?
+                cargo_home = display_cargo_home(process)?
             )
         };
         md(&mut process.stdout(), msg);
