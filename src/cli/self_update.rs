@@ -193,7 +193,8 @@ impl InstallOpts<'_> {
         }
 
         let cargo_home = process.cargo_home()?;
-        let cargo_home_display = display_cargo_home(&cargo_home, process.home_dir().as_deref());
+        let home_dir = process.home_dir();
+        let cargo_home_display = display_cargo_home(&cargo_home, home_dir.as_deref());
         #[cfg(windows)]
         let cargo_home_display = cargo_home_display.replace('\\', r"\\");
         #[cfg(windows)]
@@ -208,7 +209,7 @@ impl InstallOpts<'_> {
         #[cfg(not(windows))]
         let source_env_lines = shell::build_source_env_lines(
             &cargo_home,
-            process.home_dir().as_deref(),
+            home_dir.as_deref(),
             shell::get_available_shells(process),
         );
         #[cfg(not(windows))]
@@ -251,17 +252,14 @@ impl InstallOpts<'_> {
         let cargo_home = process.cargo_home()?;
         let cargo_bin = cargo_home.join("bin");
         install_bins(&cargo_bin, force_hard_links(process))?;
+        let home_dir = process.home_dir();
 
         #[cfg(unix)]
         {
-            let home_dir = process.home_dir();
-            unix::do_write_env_files(
-                &cargo_home,
-                home_dir.as_deref(),
-                shell::get_available_shells(process),
-            )?;
+            let shells = shell::get_available_shells(process).collect::<Vec<_>>();
+            unix::do_write_env_files(&cargo_home, home_dir.as_deref(), &shells)?;
             if !self.no_modify_path {
-                for sh in shell::get_available_shells(process) {
+                for sh in &shells {
                     let source_cmd = sh.source_string(&cargo_home, home_dir.as_deref())?;
                     add_path_setup_to_rcfiles(
                         &source_cmd,
@@ -292,8 +290,8 @@ impl InstallOpts<'_> {
 
         // If RUSTUP_HOME is not set, make sure it exists
         if process.var_os("RUSTUP_HOME").is_none() {
-            let home = process
-                .home_dir()
+            let home = home_dir
+                .as_ref()
                 .map(|p| p.join(".rustup"))
                 .ok_or_else(|| anyhow::anyhow!("could not find home dir to put .rustup in"))?;
 

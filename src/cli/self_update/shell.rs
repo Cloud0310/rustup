@@ -535,9 +535,6 @@ impl UnixShell for Xonsh {
 
         if let Some(home) = home_dir {
             paths.push(home.join(".config/xonsh/rc.xsh"));
-        }
-
-        if let Some(home) = home_dir {
             paths.push(home.join(".xonshrc"));
         }
 
@@ -572,13 +569,14 @@ impl UnixShell for Xonsh {
 }
 
 pub(crate) fn legacy_paths(process: &Process) -> impl Iterator<Item = PathBuf> + '_ {
+    let home_dir = process.home_dir();
     let zprofiles = Zsh::zdotdir(process)
         .into_iter()
-        .chain(process.home_dir())
+        .chain(home_dir.clone())
         .map(|d| d.join(".zprofile"));
     let profiles = [".bash_profile", ".profile"]
         .iter()
-        .filter_map(|rc| process.home_dir().map(|d| d.join(rc)));
+        .filter_map(move |rc| home_dir.as_ref().map(|d| d.join(rc)));
 
     profiles.chain(zprofiles)
 }

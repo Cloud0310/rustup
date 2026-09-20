@@ -104,7 +104,7 @@ pub(crate) fn add_path_setup_to_rcfiles(
 pub(crate) fn do_write_env_files(
     cargo_home: &Path,
     home_dir: Option<&Path>,
-    shells: impl Iterator<Item = Shell>,
+    shells: &[Shell],
 ) -> anyhow::Result<()> {
     let mut written = vec![];
 
@@ -179,26 +179,15 @@ pub(crate) fn remove_legacy_paths(
     home_dir: Option<&Path>,
     rcfiles: &[PathBuf],
 ) -> anyhow::Result<()> {
+    let cargo_home = Posix.cargo_home_str(cargo_home, home_dir)?;
     // Before the work to support more kinds of shells, which was released in
     // version 1.23.0 of Rustup, we always inserted this line instead, which is
     // now considered legacy
-    remove_legacy_source_command(
-        format!(
-            "export PATH=\"{}/bin:$PATH\"\n",
-            Posix.cargo_home_str(cargo_home, home_dir)?
-        ),
-        rcfiles,
-    )?;
+    remove_legacy_source_command(format!("export PATH=\"{cargo_home}/bin:$PATH\"\n"), rcfiles)?;
     // Unfortunately in 1.23, we accidentally used `source` rather than `.`
     // which, while widely supported, isn't actually POSIX, so we also
     // clean that up here.  This issue was filed as #2623.
-    remove_legacy_source_command(
-        format!(
-            "source \"{}/env\"\n",
-            Posix.cargo_home_str(cargo_home, home_dir)?
-        ),
-        rcfiles,
-    )?;
+    remove_legacy_source_command(format!("source \"{cargo_home}/env\"\n"), rcfiles)?;
 
     Ok(())
 }
