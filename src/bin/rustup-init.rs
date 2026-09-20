@@ -101,7 +101,7 @@ async fn run_rustup_inner(
             // to work.
             setup_mode::main(current_dir, process, console_filter).await
         }
-        Some(n) if n.starts_with("rustup-gc-") => {
+        Some("rustup.exe:gc") => {
             // This is the final uninstallation stage on windows where
             // rustup deletes its own exe
             cfg_select! {

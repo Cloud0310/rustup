@@ -1,18 +1,14 @@
 use std::{
     borrow::Cow,
-    env::{consts::EXE_SUFFIX, split_paths},
+    env::split_paths,
     ffi::{OsStr, OsString},
     fmt,
-    fs::OpenOptions,
+    fs::File,
     io::{self, Write},
-    os::windows::{
-        fs::OpenOptionsExt,
-        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
-    },
+    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    ptr, thread,
-    time::Duration,
+    ptr,
 };
 
 use anyhow::{Context, anyhow};
@@ -28,16 +24,15 @@ use windows_sys::Win32::{
         ERROR_FILE_NOT_FOUND, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE,
         LPARAM, WAIT_OBJECT_0, WPARAM,
     },
-    Storage::FileSystem::{
-        FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ, SYNCHRONIZE,
-    },
+    Storage::FileSystem::SYNCHRONIZE,
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next,
             TH32CS_SNAPPROCESS,
         },
         Threading::{
-            GetCurrentProcess, GetCurrentProcessId, INFINITE, OpenProcess, WaitForSingleObject,
+            GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, INFINITE, OpenProcess,
+            WaitForSingleObject,
         },
     },
     UI::WindowsAndMessaging::{
@@ -381,34 +376,26 @@ fn has_windows_sdk_libs(process: &Process) -> bool {
     false
 }
 
-/// Run by rustup-gc-$num.exe to delete CARGO_HOME
+/// Run from rustup.exe:gc.exe after the uninstall launcher exits successfully.
 #[tracing::instrument(level = "trace")]
 pub fn complete_windows_uninstall(process: &Process) -> anyhow::Result<utils::ExitCode> {
-    let uninstall = open_parent_legacy().and_then(|parent| {
-        if let Some(parent) = parent {
-            wait_for_process(parent.as_handle())?;
-        }
-        let no_modify_path = process.var_os(GC_MODIFY_PATH).as_deref() != Some(OsStr::new("1"));
+    // stdin carries an inherited process handle, not a byte stream. It remains
+    // valid even if the launcher exits before this process begins running.
+    let parent = process.stdin_handle()?;
+    wait_for_process(parent.as_handle())?;
+    let mut exit_code = 0;
+    // SAFETY: the borrowed process handle remains valid throughout the call.
+    if unsafe { GetExitCodeProcess(parent.as_handle().as_raw_handle(), &mut exit_code) } == 0 {
+        return Err(io::Error::last_os_error()).context("could not get uninstall exit status");
+    }
+    anyhow::ensure!(
+        exit_code == 0,
+        "uninstall launcher failed; aborting cleanup"
+    );
 
-        // Now that the parent has exited there are hopefully no more files open in CARGO_HOME.
-        let cargo_home = process.cargo_home()?;
-        super::clean_cargo_home(no_modify_path, process, &cargo_home)
-    });
-
-    // Now, run a *system* binary to inherit the DELETE_ON_CLOSE
-    // handle to *this* process, then exit. The OS will delete the gc
-    // exe when it exits. Do this even if uninstalling failed.
-    // Leave stdin inherited so the standard library passes GC's delete-on-close
-    // handle to the cleanup child without raw handle APIs.
-    let cleanup = Command::new("net")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context(CliError::WindowsUninstallMadness);
-
-    // Preserve the original uninstall error if starting cleanup also failed.
-    uninstall?;
-    cleanup?;
+    let no_modify_path = process.var_os(GC_MODIFY_PATH).as_deref() != Some(OsStr::new("1"));
+    let cargo_home = process.cargo_home()?;
+    super::clean_cargo_home(no_modify_path, process, &cargo_home)?;
     Ok(utils::ExitCode(0))
 }
 
@@ -688,80 +675,29 @@ pub(crate) fn self_replace(process: &Process) -> anyhow::Result<utils::ExitCode>
     Ok(utils::ExitCode(0))
 }
 
-// Spawn a temporary rustup-gc-$random.exe to finish Windows uninstall
-// after the original rustup.exe process exits. On Unix, the running
-// executable can be deleted directly. On Windows you can't delete files
-// while they are open, like when they are running.
-//
-// Here's what we're going to do:
-// - Copy rustup.exe to a temporary file in
-//   CARGO_HOME/../rustup-gc-$random.exe.
-// - Open the gc exe with the FILE_FLAG_DELETE_ON_CLOSE and
-//   FILE_SHARE_DELETE flags. This is going to be the last
-//   file to remove, and the OS is going to do it for us.
-//   Pass this handle as stdin so the standard library manages inheritance.
-//   GC does not read stdin; it uses it only to carry the deletion handle.
-// - Run the gc exe, which waits for the original rustup.exe
-//   process to close, then deletes CARGO_HOME. This process
-//   has inherited a FILE_FLAG_DELETE_ON_CLOSE handle to itself.
-// - Finally, spawn yet another system binary inheriting stdin,
-//   so *it* inherits the FILE_FLAG_DELETE_ON_CLOSE handle to
-//   the gc exe. If the gc exe exits before the system exe then at
-//   last it will be deleted when the handle closes.
-//
-// This is the DELETE_ON_CLOSE method from
-// https://www.catch22.net/tuts/win32/self-deleting-executables
-//
-// ... which doesn't actually work because Windows won't really
-// delete a FILE_FLAG_DELETE_ON_CLOSE process when it exits.
-//
-// .. augmented with this SO answer
-// https://stackoverflow.com/questions/10319526/understanding-a-self-deleting-program-in-c
+/// Run cleanup from rustup.exe:gc.exe, an NTFS alternate data stream (ADS).
+/// The stream holds the helper separately from the main executable data. After
+/// the parent exits, deleting rustup.exe also removes its streams while the
+/// helper's mapped image remains valid until it exits.
 pub(crate) fn spawn_uninstall_gc(bin_dir: &Path, no_modify_path: bool) -> anyhow::Result<()> {
-    // The rustup.exe bin
-    let rustup_path = bin_dir.join(format!("rustup{EXE_SUFFIX}"));
-
-    // The directory containing CARGO_HOME
-    let cargo_home = bin_dir
-        .parent()
-        .expect("cargo bin directory doesn't have a parent?");
-    let work_path = cargo_home
-        .parent()
-        .expect("CARGO_HOME doesn't have a parent?");
-
-    // Generate a unique name for the files we're about to move out
-    // of CARGO_HOME.
-    let numbah: u32 = rand::random();
-    let gc_exe = work_path.join(format!("rustup-gc-{numbah:x}.exe"));
-    // Copy rustup (probably this process's exe) to the gc exe
-    utils::copy_file_symlink_to_source(&rustup_path, &gc_exe)?;
-    // OpenOptions preserves the read, sharing and delete-on-close flags while
-    // letting File own the handle until it is passed to Command below.
-    let gc_handle = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
-        .open(&gc_exe)
-        .context(CliError::WindowsUninstallMadness)?;
-
-    // Pass the file as GC stdin so the standard library manages inheritance.
-    // Command retains the parent handle after spawn; keep it alive through the sleep.
-    let mut command = Command::new(gc_exe);
-    command
-        .stdin(gc_handle)
+    let gc_exe = bin_dir.join("rustup.exe:gc.exe");
+    // Both temporary file handles close before the helper is started.
+    io::copy(
+        &mut File::open(utils::current_exe()?)?,
+        &mut File::create(&gc_exe)?,
+    )
+    .context("could not copy cleanup executable")?;
+    // Command manages handle inheritance through stdin. Keep the child's
+    // working directory outside the installation so it can remove it.
+    Command::new(&gc_exe)
+        .current_dir(bin_dir.ancestors().last().unwrap())
+        .env_remove("RUSTUP_FORCE_ARG0")
         .env(GC_MODIFY_PATH, if no_modify_path { "0" } else { "1" })
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle; closing it has no effect.
+        // Command duplicates it into a real inheritable handle when spawning the child.
+        .stdin(unsafe { Stdio::from_raw_handle(GetCurrentProcess()) })
         .spawn()
-        .context(CliError::WindowsUninstallMadness)?;
-
-    // The catch 22 article says we must sleep here to give
-    // Windows a chance to bump the processes file reference
-    // count. acrichto though is in disbelief and *demanded* that
-    // we not insert a sleep. If Windows failed to uninstall
-    // correctly it is because of him.
-
-    // (.. and months later acrichto owes me a beer).
-    thread::sleep(Duration::from_millis(100));
-
+        .context("could not start cleanup helper")?;
     Ok(())
 }
 
@@ -769,7 +705,7 @@ pub(crate) fn spawn_uninstall_gc(bin_dir: &Path, no_modify_path: bool) -> anyhow
 // Older launchers omit it and require the legacy PID lookup.
 const SELF_REPLACE_PARENT: &str = "RUSTUP_SELF_REPLACE_PARENT";
 
-// The rustup-gc executable cannot accept normal function call here,
+// The GC executable cannot accept normal function calls here,
 // so we use env var here, notifying it if we need to remove $CARGO_HOME/bin from $PATH
 const GC_MODIFY_PATH: &str = "RUSTUP_GC_MODIFY_PATH";
 

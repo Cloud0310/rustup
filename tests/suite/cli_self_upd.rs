@@ -348,7 +348,7 @@ error: rustup is not installed at '[..]'
 async fn uninstall_self_delete_works() {
     let cx = setup_empty_installed().await;
     let rustup = cx.config.cargodir.join(format!("bin/rustup{EXE_SUFFIX}"));
-    let mut cmd = Command::new(rustup.clone());
+    let mut cmd = Command::new(&rustup);
     cmd.args(["self", "uninstall", "-y"]);
     cx.config.env(&mut cmd);
     let out = cmd.output().unwrap();
@@ -356,68 +356,7 @@ async fn uninstall_self_delete_works() {
     println!("err: {}", String::from_utf8(out.stderr).unwrap());
 
     assert!(out.status.success());
-    assert!(!rustup.exists());
     assert!(!cx.config.cargodir.exists());
-
-    let rustc = cx.config.cargodir.join(format!("bin/rustc{EXE_SUFFIX}"));
-    let rustdoc = cx.config.cargodir.join(format!("bin/rustdoc{EXE_SUFFIX}"));
-    let cargo = cx.config.cargodir.join(format!("bin/cargo{EXE_SUFFIX}"));
-    let rust_lldb = cx
-        .config
-        .cargodir
-        .join(format!("bin/rust-lldb{EXE_SUFFIX}"));
-    let rust_gdb = cx.config.cargodir.join(format!("bin/rust-gdb{EXE_SUFFIX}"));
-    let rust_gdbgui = cx
-        .config
-        .cargodir
-        .join(format!("bin/rust-gdbgui{EXE_SUFFIX}"));
-    assert!(!rustc.exists());
-    assert!(!rustdoc.exists());
-    assert!(!cargo.exists());
-    assert!(!rust_lldb.exists());
-    assert!(!rust_gdb.exists());
-    assert!(!rust_gdbgui.exists());
-}
-
-// On windows rustup self uninstall temporarily puts a rustup-gc-$randomnumber.exe
-// file in CONFIG.CARGODIR/.. ; check that it doesn't exist.
-#[tokio::test]
-#[cfg(windows)]
-async fn uninstall_doesnt_leave_gc_file() {
-    let cx = setup_empty_installed().await;
-    cx.config
-        .expect(["rustup", "self", "uninstall", "-y"])
-        .await
-        .is_ok();
-    let parent = cx.config.cargodir.parent().unwrap();
-
-    // The gc removal happens after rustup terminates. Typically under
-    // 100ms, but during the contention of test suites can be substantially
-    // longer while still succeeding.
-
-    let check = || {
-        let garbage = fs::read_dir(parent)
-            .unwrap()
-            .filter_map(|entry| {
-                let path = entry.unwrap().path();
-                let name = path.file_name()?.to_str()?;
-                // On Windows, this binary is cleaned up on exit
-                if !(name.starts_with("rustup-gc-") && name.ends_with(EXE_SUFFIX)) {
-                    return None;
-                }
-                Some(path.to_string_lossy().to_string())
-            })
-            .collect::<Vec<_>>();
-        if garbage.is_empty() {
-            Ok(())
-        } else {
-            Err(format!("garbage remaining: {garbage:?}"))
-        }
-    };
-    match retry(Fibonacci::from_millis(1).map(jitter).take(23), check) {
-        Ok(_) => (),
-        Err(e) => panic!("{e}"),
-    }
 }
 
 #[tokio::test]

@@ -1000,6 +1000,11 @@ pub(crate) fn uninstall(
         }
     }
 
+    // Start the helper from rustup.exe:gc.exe before making destructive changes.
+    // It removes Cargo home only after this process exits successfully.
+    #[cfg(windows)]
+    windows::spawn_uninstall_gc(&cargo_home.join("bin"), no_modify_path)?;
+
     info!("removing toolchains");
     for toolchain in cfg.list_toolchains(true)? {
         Toolchain::ensure_removed(cfg, toolchain.into())?;
@@ -1013,15 +1018,9 @@ pub(crate) fn uninstall(
         utils::remove_dir("rustup_home", &rustup_dir)?;
     }
 
-    // Delete rustup.
+    // On Windows, the helper removes rustup after this process exits.
     #[cfg(unix)]
     clean_cargo_home(no_modify_path, process, &cargo_home)?;
-    // NOTE: On windows, this is tricky because this is *probably*
-    // the running executable and on Windows can't be unlinked until
-    // the process exits.
-    // see: windows::{complete_windows_uninstall,spawn_uninstall_gc}
-    #[cfg(windows)]
-    windows::spawn_uninstall_gc(&cargo_home.join("bin"), no_modify_path)?;
 
     info!("rustup is uninstalled");
 
