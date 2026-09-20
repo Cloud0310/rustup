@@ -559,6 +559,23 @@ async fn update_updates_rustup_bin() {
     let after_hash = calc_hash(&bin);
 
     assert_ne!(before_hash, after_hash);
+    let dist_exe = cx.path().join(format!(
+        "archive/{TEST_VERSION}/{}/rustup-init{EXE_SUFFIX}",
+        this_host_tuple()
+    ));
+    assert_eq!(after_hash, calc_hash(&dist_exe));
+
+    let setup = cx
+        .config
+        .cargodir
+        .join(format!("bin/rustup-init{EXE_SUFFIX}"));
+    #[cfg(unix)]
+    assert!(setup.exists());
+    #[cfg(windows)]
+    {
+        // output() waits for the updater's inherited stderr to close on exit.
+        assert!(!setup.exists());
+    }
 }
 
 #[tokio::test]
@@ -705,73 +722,38 @@ info: cleaning up downloads & tmp directories
         .is_ok();
 }
 
-// Because self-delete on windows is hard, rustup-init doesn't
-// do it. It instead leaves itself installed for cleanup by later
-// invocations of rustup.
-#[tokio::test]
-async fn updater_leaves_itself_for_later_deletion() {
-    let cx = SelfUpdateTestContext::new(TEST_VERSION).await;
-    cx.config
-        .expect(["rustup-init", "-y", "--no-modify-path"])
-        .await
-        .is_ok();
-    cx.config
-        .expect(["rustup", "update", "nightly"])
-        .await
-        .is_ok();
-    cx.config.expect(["rustup", "self", "update"]).await.is_ok();
-
-    let setup = cx
-        .config
-        .cargodir
-        .join(format!("bin/rustup-init{EXE_SUFFIX}"));
-    assert!(setup.exists());
-}
-
 #[tokio::test]
 async fn updater_is_deleted_after_running_rustup() {
-    let cx = SelfUpdateTestContext::new(TEST_VERSION).await;
-    cx.config
-        .expect(["rustup-init", "-y", "--no-modify-path"])
-        .await
-        .is_ok();
-    cx.config
-        .expect(["rustup", "update", "nightly"])
-        .await
-        .is_ok();
-    cx.config.expect(["rustup", "self", "update"]).await.is_ok();
-
-    cx.config
-        .expect(["rustup", "update", "nightly"])
-        .await
-        .is_ok();
+    let cx = setup_empty_installed().await;
 
     let setup = cx
         .config
         .cargodir
         .join(format!("bin/rustup-init{EXE_SUFFIX}"));
+    // Simulate an updater left behind by an interrupted or older update.
+    fs::write(&setup, b"leftover updater").unwrap();
+
+    cx.config
+        .expect(["rustup", "toolchain", "list"])
+        .await
+        .is_ok();
+
     assert!(!setup.exists());
 }
 
 #[tokio::test]
 async fn updater_is_deleted_after_running_rustc() {
-    let cx = SelfUpdateTestContext::new(TEST_VERSION).await;
-    cx.config
-        .expect(["rustup-init", "-y", "--no-modify-path"])
-        .await
-        .is_ok();
-    cx.config
-        .expect(["rustup", "default", "nightly"])
-        .await
-        .is_ok();
-    cx.config.expect(["rustup", "self", "update"]).await.is_ok();
-
-    cx.config.expect(["rustc", "--version"]).await.is_ok();
+    let cx = setup_installed().await;
 
     let setup = cx
         .config
         .cargodir
         .join(format!("bin/rustup-init{EXE_SUFFIX}"));
+    // Simulate an updater left behind by an interrupted or older update.
+    fs::write(&setup, b"leftover updater").unwrap();
+
+    cx.config.expect(["rustc", "--version"]).await.is_ok();
+
     assert!(!setup.exists());
 }
 

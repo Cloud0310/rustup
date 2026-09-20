@@ -1178,21 +1178,12 @@ pub(crate) fn self_update_permitted(explicit: bool) -> anyhow::Result<SelfUpdate
     Ok(SelfUpdatePermission::Permit)
 }
 
-/// Self update downloads rustup-init to `$CARGO_HOME/bin/rustup-init`
-/// and runs it.
+/// Download rustup-init into `$CARGO_HOME/bin` and run it with `--self-replace`.
 ///
-/// It does a few things to accommodate self-delete problems on windows:
-///
-/// rustup-init is run in two stages, first with `--self-upgrade`,
-/// which displays update messages and asks for confirmations, etc;
-/// then with `--self-replace`, which replaces the rustup binary and
-/// hardlinks. The last step is done without waiting for confirmation
-/// on windows so that the running exe can be deleted.
-///
-/// Because it's again difficult for rustup-init to delete itself
-/// (and on windows this process will not be running to do it),
-/// rustup-init is stored in `$CARGO_HOME/bin`, and then deleted next
-/// time rustup runs.
+/// On Windows, start the updater without waiting so it can wait for this process
+/// to exit before replacing rustup and its proxies. After installing, the updater
+/// moves its running image into an ADS and deletes its host. A later rustup run
+/// still cleans up updaters left behind by older or interrupted updates.
 pub(crate) async fn update(cfg: &Cfg<'_>) -> anyhow::Result<ExitCode> {
     common::warn_if_host_is_emulated(cfg.process);
 

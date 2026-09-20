@@ -3,9 +3,12 @@ use std::{
     env::split_paths,
     ffi::{OsStr, OsString},
     fmt,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{self, Write},
-    os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
+    os::windows::{
+        fs::OpenOptionsExt,
+        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     ptr,
@@ -21,10 +24,10 @@ use windows_registry::{CURRENT_USER, HSTRING, Key};
 use windows_result::WIN32_ERROR;
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_FILE_NOT_FOUND, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE,
-        LPARAM, WAIT_OBJECT_0, WPARAM,
+        ERROR_FILE_NOT_FOUND, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER, HANDLE,
+        INVALID_HANDLE_VALUE, LPARAM, WAIT_OBJECT_0, WPARAM,
     },
-    Storage::FileSystem::SYNCHRONIZE,
+    Storage::FileSystem::{DELETE, FileRenameInfo, SYNCHRONIZE, SetFileInformationByHandle},
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next,
@@ -671,6 +674,45 @@ pub(crate) fn self_replace(process: &Process) -> anyhow::Result<utils::ExitCode>
         &process.cargo_home()?.join("bin"),
         super::force_hard_links(process),
     )?;
+
+    // Install first: renaming the running image into an ADS leaves the host's
+    // default data stream empty, so it can no longer be used as an install source.
+    let source = utils::current_exe()?;
+    let file = OpenOptions::new()
+        .access_mode(DELETE)
+        .open(&source)
+        .context("could not open self updater for cleanup")?;
+    // FILE_RENAME_INFO with enough space for our fixed UTF-16 stream name.
+    #[repr(C)]
+    struct RenameInfo {
+        flags: u32,
+        root_directory: HANDLE,
+        file_name_length: u32,
+        file_name: [u16; 3],
+    }
+    let name = b":gc".map(u16::from);
+    let rename = RenameInfo {
+        flags: 0,
+        root_directory: ptr::null_mut(),
+        file_name_length: size_of_val(&name) as u32,
+        file_name: name,
+    };
+    // SAFETY: RenameInfo has the FILE_RENAME_INFO layout with an extended name.
+    // Its storage and the owned file handle remain valid throughout the call.
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfo,
+            ptr::from_ref(&rename).cast(),
+            size_of_val(&rename) as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error())
+            .context("could not move self updater into cleanup stream");
+    }
+    // The running image is now in the ADS, allowing its host to be deleted.
+    utils::remove_file("self updater", &source)?;
 
     Ok(utils::ExitCode(0))
 }
