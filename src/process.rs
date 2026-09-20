@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::os::windows::io::AsHandle;
 #[cfg(feature = "test")]
 use std::{
     collections::HashMap,
@@ -194,6 +196,16 @@ impl Process {
             Self::OsProcess(_) => Box::new(io::stdin()),
             #[cfg(feature = "test")]
             Self::TestProcess(p) => Box::new(file_source::TestStdin(p.stdin.clone())),
+        }
+    }
+
+    /// Access stdin as an inherited Windows handle rather than a byte stream.
+    #[cfg(windows)]
+    pub(crate) fn stdin_handle(&self) -> anyhow::Result<impl AsHandle> {
+        match self {
+            Self::OsProcess(_) => Ok(io::stdin()),
+            #[cfg(feature = "test")]
+            Self::TestProcess(_) => bail!("test processes do not have a stdin handle"),
         }
     }
 

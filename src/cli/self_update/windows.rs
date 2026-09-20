@@ -5,10 +5,9 @@ use std::{
     fmt,
     fs::OpenOptions,
     io::{self, Write},
-    mem,
     os::windows::{
         fs::OpenOptionsExt,
-        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle},
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -26,8 +25,8 @@ use windows_registry::{CURRENT_USER, HSTRING, Key};
 use windows_result::WIN32_ERROR;
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_FILE_NOT_FOUND, ERROR_INVALID_DATA, INVALID_HANDLE_VALUE, LPARAM, WAIT_OBJECT_0,
-        WPARAM,
+        ERROR_FILE_NOT_FOUND, ERROR_INVALID_DATA, ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE,
+        LPARAM, WAIT_OBJECT_0, WPARAM,
     },
     Storage::FileSystem::{
         FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ, SYNCHRONIZE,
@@ -37,7 +36,9 @@ use windows_sys::Win32::{
             CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next,
             TH32CS_SNAPPROCESS,
         },
-        Threading::{GetCurrentProcessId, INFINITE, OpenProcess, WaitForSingleObject},
+        Threading::{
+            GetCurrentProcess, GetCurrentProcessId, INFINITE, OpenProcess, WaitForSingleObject,
+        },
     },
     UI::WindowsAndMessaging::{
         HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutA, WM_SETTINGCHANGE,
@@ -383,7 +384,10 @@ fn has_windows_sdk_libs(process: &Process) -> bool {
 /// Run by rustup-gc-$num.exe to delete CARGO_HOME
 #[tracing::instrument(level = "trace")]
 pub fn complete_windows_uninstall(process: &Process) -> anyhow::Result<utils::ExitCode> {
-    let uninstall = wait_for_parent().and_then(|()| {
+    let uninstall = open_parent_legacy().and_then(|parent| {
+        if let Some(parent) = parent {
+            wait_for_process(parent.as_handle())?;
+        }
         let no_modify_path = process.var_os(GC_MODIFY_PATH).as_deref() != Some(OsStr::new("1"));
 
         // Now that the parent has exited there are hopefully no more files open in CARGO_HOME.
@@ -408,7 +412,8 @@ pub fn complete_windows_uninstall(process: &Process) -> anyhow::Result<utils::Ex
     Ok(utils::ExitCode(0))
 }
 
-pub(crate) fn wait_for_parent() -> anyhow::Result<()> {
+// PID lookup retained for older self-update launchers that do not pass a process handle.
+fn open_parent_legacy() -> anyhow::Result<Option<OwnedHandle>> {
     unsafe {
         // Take a snapshot of system processes, one of which is ours
         // and contains our parent's pid
@@ -420,8 +425,10 @@ pub(crate) fn wait_for_parent() -> anyhow::Result<()> {
 
         let snapshot = OwnedHandle::from_raw_handle(snapshot);
 
-        let mut entry: PROCESSENTRY32 = mem::zeroed();
-        entry.dwSize = size_of::<PROCESSENTRY32>() as u32;
+        let mut entry = PROCESSENTRY32 {
+            dwSize: size_of::<PROCESSENTRY32>() as u32,
+            ..Default::default()
+        };
 
         // Iterate over system processes looking for ours
         let success = Process32First(snapshot.as_raw_handle(), &mut entry);
@@ -447,21 +454,23 @@ pub(crate) fn wait_for_parent() -> anyhow::Result<()> {
         // Get a handle to the parent process
         let parent = OpenProcess(SYNCHRONIZE, 0, parent_id);
         if parent.is_null() {
-            // This just means the parent has already exited.
-            return Ok(());
-        }
-
-        let parent = OwnedHandle::from_raw_handle(parent);
-
-        // Wait for our parent to exit
-        let res = WaitForSingleObject(parent.as_raw_handle(), INFINITE);
-
-        if res != WAIT_OBJECT_0 {
             let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                // The updater's parent may already have exited.
+                return Ok(None);
+            }
             return Err(err).context(CliError::WindowsUninstallMadness);
         }
-    }
 
+        Ok(Some(OwnedHandle::from_raw_handle(parent)))
+    }
+}
+
+fn wait_for_process(parent: BorrowedHandle<'_>) -> anyhow::Result<()> {
+    // SAFETY: the borrowed process handle remains alive throughout the wait.
+    if unsafe { WaitForSingleObject(parent.as_raw_handle(), INFINITE) } != WAIT_OBJECT_0 {
+        return Err(io::Error::last_os_error()).context(CliError::WindowsUninstallMadness);
+    }
     Ok(())
 }
 
@@ -647,6 +656,10 @@ pub(crate) fn remove_uninstall_registry_entry(sub_key: &str) -> anyhow::Result<(
 pub(crate) fn run_update(setup_path: &Path, process: &Process) -> anyhow::Result<utils::ExitCode> {
     Command::new(setup_path)
         .arg("--self-replace")
+        // SAFETY: GetCurrentProcess returns a valid pseudo-handle; closing it has no effect.
+        // Command duplicates it into a real inheritable handle when spawning the child.
+        .stdin(unsafe { Stdio::from_raw_handle(GetCurrentProcess()) })
+        .env(SELF_REPLACE_PARENT, "1")
         .spawn()
         .context("unable to run updater")?;
 
@@ -660,7 +673,13 @@ pub(crate) fn run_update(setup_path: &Path, process: &Process) -> anyhow::Result
 }
 
 pub(crate) fn self_replace(process: &Process) -> anyhow::Result<utils::ExitCode> {
-    wait_for_parent()?;
+    // Only old launchers lack the marker. A failed handle wait must not fall back
+    // to PID lookup, which could identify a different process after PID reuse.
+    if process.var_os(SELF_REPLACE_PARENT).is_some() {
+        wait_for_process(process.stdin_handle()?.as_handle())?;
+    } else if let Some(parent) = open_parent_legacy()? {
+        wait_for_process(parent.as_handle())?;
+    }
     install_bins(
         &process.cargo_home()?.join("bin"),
         super::force_hard_links(process),
@@ -745,6 +764,10 @@ pub(crate) fn spawn_uninstall_gc(bin_dir: &Path, no_modify_path: bool) -> anyhow
 
     Ok(())
 }
+
+// Marks stdin as an inherited parent process handle for --self-replace.
+// Older launchers omit it and require the legacy PID lookup.
+const SELF_REPLACE_PARENT: &str = "RUSTUP_SELF_REPLACE_PARENT";
 
 // The rustup-gc executable cannot accept normal function call here,
 // so we use env var here, notifying it if we need to remove $CARGO_HOME/bin from $PATH
