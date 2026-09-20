@@ -53,19 +53,20 @@ pub(crate) fn do_anti_sudo_check(
     Ok(utils::ExitCode(0))
 }
 
-pub(crate) fn do_remove_from_path(process: &Process) -> anyhow::Result<()> {
+/// Removes PATH setup commands from existing shell rcfiles.
+pub(crate) fn remove_path_setup_from_rcfiles(process: &Process) -> anyhow::Result<()> {
     for sh in shell::get_available_shells(process) {
-        let source_bytes = format!("{}\n", sh.source_string(process)?).into_bytes();
+        let command_bytes = format!("{}\n", sh.source_string(process)?).into_bytes();
 
         // Check more files for cleanup than normally are updated.
         for rc in sh.rcfiles(process).iter().filter(|rc| rc.is_file()) {
             let file = utils::read_file("rcfile", rc)?;
             let file_bytes = file.into_bytes();
             // FIXME: This is whitespace sensitive where it should not be.
-            if let Some(idx) = find_exact_line(&file_bytes, &source_bytes) {
+            if let Some(idx) = find_exact_line(&file_bytes, &command_bytes) {
                 // Here we rewrite the file without the offending line.
                 let mut new_bytes = file_bytes[..idx].to_vec();
-                new_bytes.extend(&file_bytes[idx + source_bytes.len()..]);
+                new_bytes.extend(&file_bytes[idx + command_bytes.len()..]);
                 let new_file = String::from_utf8(new_bytes).unwrap();
                 utils::write_file("rcfile", rc, &new_file)?;
             }
@@ -77,7 +78,7 @@ pub(crate) fn do_remove_from_path(process: &Process) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn do_add_to_path(process: &Process) -> anyhow::Result<()> {
+pub(crate) fn add_path_setup_to_rcfiles(process: &Process) -> anyhow::Result<()> {
     for sh in shell::get_available_shells(process) {
         let source_cmd = sh.source_string(process)?;
         let source_cmd_with_newline = format!("\n{source_cmd}");

@@ -83,7 +83,7 @@ mod shell;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-use unix::{do_add_to_path, do_remove_from_path};
+use unix::{add_path_setup_to_rcfiles, remove_path_setup_from_rcfiles};
 #[cfg(unix)]
 pub(crate) use unix::{run_update, self_replace};
 
@@ -249,6 +249,9 @@ impl InstallOpts<'_> {
         unix::do_write_env_files(process)?;
 
         if !self.no_modify_path {
+            #[cfg(unix)]
+            add_path_setup_to_rcfiles(process)?;
+            #[cfg(windows)]
             do_add_to_path(process)?;
         }
 
@@ -691,7 +694,7 @@ fn pre_install_msg(no_modify_path: bool, process: &Process) -> anyhow::Result<St
     let rustup_home = home::rustup_home()?;
 
     if !no_modify_path {
-        // Brittle code warning: some duplication in unix::do_add_to_path
+        // Brittle code warning: some duplication in unix::add_path_setup_to_rcfiles
         #[cfg(not(windows))]
         {
             let rcfiles = shell::get_available_shells(process)
@@ -1065,6 +1068,9 @@ fn clean_cargo_home(
         }
         Ok(()) if !no_modify_path => {
             info!("removing cargo bin directory `{cargo_bin_display}` from $PATH");
+            #[cfg(unix)]
+            remove_path_setup_from_rcfiles(process)?;
+            #[cfg(windows)]
             do_remove_from_path(process)?;
         }
         Ok(()) => {}
