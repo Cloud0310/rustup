@@ -59,7 +59,11 @@ pub(crate) fn remove_path_setup_from_rcfiles(process: &Process) -> anyhow::Resul
         let command_bytes = format!("{}\n", sh.source_string(process)?).into_bytes();
 
         // Check more files for cleanup than normally are updated.
-        for rc in sh.rcfiles(process).iter().filter(|rc| rc.is_file()) {
+        for rc in sh
+            .rcfile_candidates(process)
+            .iter()
+            .filter(|rc| rc.is_file())
+        {
             let file = utils::read_file("rcfile", rc)?;
             let file_bytes = file.into_bytes();
             // FIXME: This is whitespace sensitive where it should not be.
@@ -83,7 +87,7 @@ pub(crate) fn add_path_setup_to_rcfiles(process: &Process) -> anyhow::Result<()>
         let source_cmd = sh.source_string(process)?;
         let source_cmd_with_newline = format!("\n{source_cmd}");
 
-        for rc in sh.update_rcs(process) {
+        for rc in sh.rcfiles_for_install(process) {
             let cmd_to_write = match utils::read_file("rcfile", &rc) {
                 Ok(contents) if contents.contains(&source_cmd) => continue,
                 Ok(contents) if !contents.ends_with('\n') => &source_cmd_with_newline,
